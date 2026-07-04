@@ -209,7 +209,7 @@ tbody tr:hover td{background:#f4f9f6}
 <button class="pass-eye" onclick="togglePass('li-pass',this)">👁</button>
 </div>
 </div>
-<button class="btn be btn-full btn-lg" onclick="doLogin()">🔐 Entrar na Plataforma</button>
+<button id="li-btn" class="btn be btn-full btn-lg" onclick="doLogin()">🔐 Entrar na Plataforma</button>
 <div class="login-err" id="li-err"></div>
 <!-- Botão público: baixar instruções de uso -->
 <div style="margin-top:1rem">
@@ -1195,13 +1195,27 @@ function _loadFirebaseSdk(){
 const LS  =k=>{try{return JSON.parse(localStorage.getItem('pen_'+k)||'null');}catch{return null;}};
 const LSset=(k,v)=>{try{localStorage.setItem('pen_'+k,JSON.stringify(v));}catch{}};
 
+// ── fetch com timeout ─────────────────────────────────────────────
+// CORREÇÃO: sem timeout, um fetch() que trava (rede instável, proxy
+// corporativo, Wi-Fi de campus, alguns bloqueadores/extensões) nunca
+// resolve nem rejeita — o que podia deixar a tela de login "pendurada"
+// para sempre em determinados navegadores/redes, sem nenhuma mensagem
+// de erro. Com AbortController, qualquer chamada de rede da Plataforma
+// PEN desiste após alguns segundos e cai no fallback local, garantindo
+// que a tela de login sempre responda, em qualquer navegador.
+function fetchComTimeout(url, opts, ms){
+  const ctrl = new AbortController();
+  const t = setTimeout(()=>ctrl.abort(), ms || 8000);
+  return fetch(url, {...(opts||{}), signal: ctrl.signal}).finally(()=>clearTimeout(t));
+}
+
 async function restGet(p){
   try{
     // cache:'no-store' evita que o navegador sirva uma resposta HTTP
     // antiga em cache para a MESMA URL (ex.: polling de mensagens a
     // cada 30s), o que fazia dados já alterados no Firebase (como uma
     // mensagem apagada) reaparecerem depois de um tempo.
-    const r=await fetch(DB_REST+'/'+p+'.json',{cache:'no-store'});
+    const r=await fetchComTimeout(DB_REST+'/'+p+'.json',{cache:'no-store'},8000);
     if(!r.ok) return null;
     const j=await r.json();
     if(j&&typeof j==='object'&&j.error) return null;
@@ -1209,10 +1223,10 @@ async function restGet(p){
   }catch{return null;}
 }
 async function restPut(p,v){
-  try{const r=await fetch(DB_REST+'/'+p+'.json',{method:'PUT',headers:{'Content-Type':'application/json'},body:JSON.stringify(v)});return r.ok;}catch{return false;}
+  try{const r=await fetchComTimeout(DB_REST+'/'+p+'.json',{method:'PUT',headers:{'Content-Type':'application/json'},body:JSON.stringify(v)},8000);return r.ok;}catch{return false;}
 }
 async function restDelete(p){
-  try{await fetch(DB_REST+'/'+p+'.json',{method:'DELETE'});}catch{}
+  try{await fetchComTimeout(DB_REST+'/'+p+'.json',{method:'DELETE'},8000);}catch{}
 }
 async function dbGet(p){
   const rv=await restGet(p);
@@ -1233,7 +1247,7 @@ async function dbRemove(p){
 }
 async function dbPush(p,v){
   try{
-    const r=await fetch(DB_REST+'/'+p+'.json',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(v)});
+    const r=await fetchComTimeout(DB_REST+'/'+p+'.json',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(v)},8000);
     if(r.ok){const j=await r.json();const id=j.name;const d=LS(p)||{};d[id]=v;LSset(p,d);return id;}
   }catch{}
   const d=LS(p)||{};
@@ -1361,6 +1375,20 @@ async function loadAll(){
     }
   }).catch(()=>{});
 
+  // CORREÇÃO CRÍTICA DE ACESSO: syncFirebase() existia no código mas
+  // nunca era chamada em lugar nenhum do app. Isso significa que, ao
+  // abrir a Plataforma PEN em um navegador/computador que não tivesse
+  // um cache local já sincronizado, gestoresData ficava preso ao "seed"
+  // embutido no próprio arquivo HTML (dados de quando o arquivo foi
+  // gerado) — sem NUNCA buscar os dados reais e atuais do Firebase
+  // (nomes, e-mails e senhas alterados pela COPEN-FT depois). Isso
+  // explica por que o acesso funcionava em alguns computadores (cujo
+  // navegador já tinha, por acaso, dados corretos em memória/cache) e
+  // falhava em outros — independente do navegador usado. Buscamos os
+  // dados atuais do Firebase logo na abertura da página, em qualquer
+  // navegador, sem travar a exibição inicial.
+  syncFirebase().catch(()=>{});
+
   renderAll();
   showArea('cad');
 }
@@ -1463,11 +1491,47 @@ function baixarInstrucoes() {
   }
 }
 
-function doLogin(){
+async function doLogin(){
   const email=document.getElementById('li-email').value.trim();
   const pass=document.getElementById('li-pass').value;
   const err=document.getElementById('li-err');
+  const btn=document.getElementById('li-btn');
+  err.textContent='';
   if(!email||!pass){err.textContent='Preencha e-mail e senha.';return;}
+
+  // CORREÇÃO CRÍTICA DE ACESSO: antes de validar a senha, busca os
+  // dados mais recentes de config/copen e gestores DIRETO do Firebase,
+  // com timeout curto (não trava a tela em nenhum navegador/rede) e
+  // fallback silencioso para o que já estiver em memória se a rede
+  // falhar. Isso garante que o exato momento do login sempre use as
+  // credenciais mais atuais possíveis, em qualquer navegador
+  // (Chrome, Safari, Edge, Firefox, Brave, Opera etc.), corrigindo o
+  // problema de gestores não conseguirem entrar com a senha/e-mail
+  // que a COPEN-FT confirma estarem corretos no cadastro.
+  if(btn){btn.disabled=true;btn.textContent='🔄 Verificando…';}
+  try{
+    const [cfgFresh,gFresh]=await Promise.all([
+      dbGet('config/copen').catch(()=>null),
+      dbGet('gestores').catch(()=>null)
+    ]);
+    if(cfgFresh&&typeof cfgFresh==='object'&&cfgFresh.email){
+      copenCfg={...copenCfg,...cfgFresh};
+      LSset('config/copen',copenCfg);
+    }
+    const gKeysFresh=gFresh&&typeof gFresh==='object'?Object.keys(gFresh):[];
+    if(gKeysFresh.length>=10&&gKeysFresh.some(k=>/^g\d/.test(k))){
+      // Dado do Firebase é a fonte de verdade no momento do login —
+      // não mescla com cache local desatualizado deste navegador.
+      applyGestoresSeed(gFresh);
+      LSset('gestores',gFresh);
+    }
+  }catch(e){
+    // Rede indisponível: segue com o que já está em memória (seed
+    // embutido ou último cache local), sem travar o acesso.
+  }finally{
+    if(btn){btn.disabled=false;btn.textContent='🔐 Entrar na Plataforma';}
+  }
+
   // COPEN-FT login
   if(email===copenCfg.email&&pass===copenCfg.senha){
     currentUser={role:'copen',nome:copenCfg.nome,email};
@@ -1841,24 +1905,53 @@ async function saveGestor(){
   const descricao=document.getElementById('mg-desc').value.trim();
   const senha=document.getElementById('mg-senha').value;
   const err=document.getElementById('mg-err');
+  err.textContent='';
   if(!nome||!email||!cargo||!modalidade||!sigla){err.textContent='Preencha os campos obrigatórios.';return;}
   const obj={nome,email,cargo,modalidade,sigla,descricao,senha,updatedAt:Date.now()};
-  if(id){
-    obj.status=gestoresData[id]?.status||'nd';
-    await dbSet('gestores/'+id,{...gestoresData[id],...obj});
-    gestoresData[id]={id,...gestoresData[id],...obj};
-  }else{
-    obj.status='nd';obj.createdAt=Date.now();
-    const nid=await dbPush('gestores',obj);
-    gestoresData[nid]={id:nid,...obj};
+  // Guarda o registro ANTIGO antes de sobrescrever gestoresData[id] —
+  // usado tanto no log de auditoria (correção: antes comparava o dado já
+  // atualizado consigo mesmo, nunca detectando mudança) quanto para
+  // reverter localmente se a gravação no Firebase não for confirmada.
+  const gOld = id ? {...(gestoresData[id]||{})} : null;
+  const saveBtn = document.querySelector('#modal-gestor .bgrp .be');
+  if(saveBtn){saveBtn.disabled=true;saveBtn.textContent='💾 Salvando…';}
+  try{
+    if(id){
+      obj.status=gOld?.status||'nd';
+      const fullObj={...gOld,...obj};
+      await dbSet('gestores/'+id,fullObj);
+      // CORREÇÃO: antes o modal fechava e mostrava sucesso mesmo que a
+      // gravação no Firebase tivesse falhado silenciosamente (rede
+      // instável) — foi exatamente esse tipo de falha silenciosa que
+      // fazia um gestor não conseguir entrar com a senha que a COPEN-FT
+      // via como "salva" no cadastro. Agora confirma-se lendo de volta.
+      const saved = await dbGet('gestores/'+id);
+      if(!saved || saved.senha!==senha || saved.email!==email){
+        throw new Error('sincronização não confirmada');
+      }
+      gestoresData[id]={id,...saved};
+    }else{
+      obj.status='nd';obj.createdAt=Date.now();
+      const nid=await dbPush('gestores',obj);
+      const saved = await dbGet('gestores/'+nid);
+      if(!saved || saved.senha!==senha){
+        throw new Error('sincronização não confirmada');
+      }
+      gestoresData[nid]={id:nid,...saved};
+    }
+  }catch(e){
+    if(saveBtn){saveBtn.disabled=false;saveBtn.textContent='💾 Salvar';}
+    err.textContent='Não foi possível confirmar a gravação no servidor. Verifique sua conexão e tente novamente.';
+    return;
   }
-  // Audit log
+  if(saveBtn){saveBtn.disabled=false;saveBtn.textContent='💾 Salvar';}
+  // Audit log — compara com o registro ANTES da edição (gOld)
   if(id){
-    const gOld=gestoresData[id]||{};
     if(nome!==(gOld.nome||'')) await logAudit('editar_cadastro', gOld.nome||nome, 'nome', gOld.nome, nome);
     if(email!==(gOld.email||'')) await logAudit('editar_cadastro', gOld.nome||nome, 'email', gOld.email, email);
     if(cargo!==(gOld.cargo||'')) await logAudit('editar_cadastro', nome, 'cargo', gOld.cargo, cargo);
     if(sigla!==(gOld.sigla||'')) await logAudit('editar_cadastro', nome, 'sigla', gOld.sigla, sigla);
+    if(senha!==(gOld.senha||'')) await logAudit('alterar_senha', nome, 'senha', '••••', '••••');
   } else {
     await logAudit('criar_gestor', nome, 'completo', '—', nome+' ('+sigla+')');
   }
@@ -1869,7 +1962,24 @@ async function resetSenha(id){
   const g=gestoresData[id];if(!g)return;
   const nova=prompt(`Nova senha para ${g.nome}:`,'123456');
   if(nova===null)return;if(!nova){alert('Senha não pode ser vazia.');return;}
-  await dbSet('gestores/'+id+'/senha',nova);gestoresData[id].senha=nova;renderCadGestores();
+  // CORREÇÃO: antes, gravava-se apenas o sub-campo 'senha' isoladamente,
+  // sem atualizar 'updatedAt' e sem confirmar que a gravação realmente
+  // persistiu no Firebase — se a rede falhasse nesse instante, a senha
+  // nunca era realmente trocada, mas nada avisava disso (mesmo bug já
+  // corrigido nas mensagens). Agora grava-se o registro COMPLETO, com
+  // updatedAt atualizado, e confirma-se lendo de volta do Firebase.
+  const updated = {...g, senha: nova, updatedAt: Date.now()};
+  try {
+    await dbSet('gestores/'+id, updated);
+    const saved = await dbGet('gestores/'+id);
+    if (!saved || saved.senha !== nova) throw new Error('sincronização não confirmada');
+    gestoresData[id] = {id, ...saved};
+    await logAudit('alterar_senha', g.nome, 'senha', '••••', '••••');
+    toast('Senha redefinida e sincronizada com sucesso.', 'ok');
+  } catch(e) {
+    toast('Não foi possível confirmar a gravação da nova senha no Firebase. Tente novamente.', 'err');
+  }
+  renderCadGestores();
 }
 async function deleteGestor(id){
   const g=gestoresData[id];if(!g)return;
@@ -3686,20 +3796,42 @@ async function gSalvarSenha(){
   const ok=document.getElementById('gcfg-senha-ok');
   err.textContent=''; ok.style.display='none';
   if(!atual||!nova||!conf){err.textContent='Preencha todos os campos.';return;}
-  const g=gestoresData[currentUser.id];
-  if(!g){err.textContent='Gestor não encontrado.';return;}
-  if(g.senha!==atual){err.textContent='Senha atual incorreta.';return;}
   if(nova.length<4){err.textContent='A nova senha deve ter ao menos 4 caracteres.';return;}
   if(nova!==conf){err.textContent='As senhas não conferem.';return;}
-  await dbSet('gestores/'+currentUser.id+'/senha',nova);
-  gestoresData[currentUser.id].senha=nova;
-  await logAudit('alterar_senha', currentUser.nome, 'senha', '••••', '••••');
-  document.getElementById('gcfg-senha-atual').value='';
-  document.getElementById('gcfg-senha-nova').value='';
-  document.getElementById('gcfg-senha-conf').value='';
-  ok.style.display='inline';
-  setTimeout(()=>ok.style.display='none',3000);
-  toast('Senha alterada com sucesso!','ok');
+
+  // CORREÇÃO: este era o principal responsável pelo problema de login
+  // relatado ("mudei a senha, funcionou uma vez, depois nunca mais
+  // consegui entrar"). Antes: (1) a "senha atual" era validada contra o
+  // registro em memória do navegador, que podia estar desatualizado;
+  // (2) gravava-se apenas o sub-campo 'senha' isoladamente, sem atualizar
+  // 'updatedAt' e SEM checar se a gravação realmente persistiu no
+  // Firebase — se a rede falhasse nesse instante, a interface mostrava
+  // "Senha alterada com sucesso!" mesmo que a senha nova NUNCA tivesse
+  // sido salva de fato, deixando o gestor com uma senha que ele acha
+  // que é a válida mas que o Firebase nunca recebeu.
+  let gFresh = null;
+  try { gFresh = await dbGet('gestores/'+currentUser.id); } catch(e) {}
+  const g = (gFresh && typeof gFresh === 'object') ? gFresh : gestoresData[currentUser.id];
+  if(!g){err.textContent='Gestor não encontrado.';return;}
+  if(g.senha!==atual){err.textContent='Senha atual incorreta.';return;}
+
+  const updated = {...g, senha: nova, updatedAt: Date.now()};
+  try {
+    await dbSet('gestores/'+currentUser.id, updated);
+    const saved = await dbGet('gestores/'+currentUser.id);
+    if (!saved || saved.senha !== nova) throw new Error('sincronização não confirmada');
+    gestoresData[currentUser.id] = {id: currentUser.id, ...saved};
+    await logAudit('alterar_senha', currentUser.nome, 'senha', '••••', '••••');
+    document.getElementById('gcfg-senha-atual').value='';
+    document.getElementById('gcfg-senha-nova').value='';
+    document.getElementById('gcfg-senha-conf').value='';
+    ok.style.display='inline';
+    setTimeout(()=>ok.style.display='none',3000);
+    toast('Senha alterada com sucesso!','ok');
+  } catch(e) {
+    err.textContent = 'Não foi possível confirmar a gravação da nova senha no servidor. Verifique sua conexão e tente novamente.';
+    toast('Falha ao sincronizar a nova senha. Tente novamente.', 'err');
+  }
 }
 
 
