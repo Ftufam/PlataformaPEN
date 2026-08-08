@@ -2595,6 +2595,7 @@ function relRows(){
 
   rows = rows.filter(r => r && !r._deleted);
   rows.forEach(r => normalizeEnsCmt(r));
+  _espSyncRows(rows, false);
 
   const curso = (relEl('rel-curso-filtro')||{value:''}).value;
   const busca = ((relEl('rel-busca-geral')||{value:''}).value || '').toLowerCase();
@@ -5484,6 +5485,7 @@ function ensalarRender() {
     tb.innerHTML = '<tr><td colspan="22" style="text-align:center;padding:3rem;color:var(--t4)">Nenhum registro encontrado.</td></tr>';
     return;
   }
+  _espSyncRows(ensalarFiltered, false);
   tb.innerHTML = ensalarFiltered.map((row, i) => ensalarRowHTML(row, i)).join('');
   ensalarPinCols();
 }
@@ -6837,6 +6839,9 @@ async function copenEnsalarLoad() {
   const el = document.getElementById('cens-count');
   if (el) el.textContent = total + ' registro(s)';
   _buildConflictMap();
+  // Traz LAT/LONG/REF do Perfil dos Espacos da FT e grava as diferencas,
+  // cobrindo os locais cadastrados enquanto esta aba estava fechada.
+  if (typeof _espAgendarSync === 'function') _espAgendarSync('abertura da aba Ensalar');
 }
 
 // ── Populate Curso filter ────────────────────────────────────────
@@ -6901,8 +6906,10 @@ function copenEnsalarRender() {
   };
   const fields = ['ANOSEM','CURSO','PER','CODISC','DISC','CODTUR','TIPTUR','OFERTANTE','PROF','2A','3A','4A','5A','6A','CAPMAXTUR','OBSDISC','OBSPROF','OBSV2','OBSV3','LOCAL','LAT','LONG','REF'];
 
+  // Preenche LAT/LONG/REF a partir do Perfil dos Espacos da FT
+  _espSyncRows(rows, false);
   _buildConflictMap();
-  tb.innerHTML = rows.map((r,i) => {
+  tb.innerHTML = _espDatalistHTML('cens-locais-list') + rows.map((r,i) => {
     normalizeEnsCmt(r);
     const st = r._status || 'original';
     const _rc = (window._copenConflictMap||{})[r.id];
@@ -6925,6 +6932,10 @@ function copenEnsalarRender() {
       return `<td style="${P};${editTint(field)}">` +
         _iC +
         `<input data-id="${id}" data-field="${field}" value="${esc(String(val ?? ''))}"` +
+        (field==='LOCAL' ? ' list="cens-locais-list" autocomplete="off"' : '') +
+        (['LAT','LONG','REF'].includes(field)
+          ? ' title="Preenchido automaticamente pelo Perfil dos Espacos da FT"'
+          : '') +
         ` onchange="copenEnsalarCellChange(this)"` +
         (_hC?' data-conflict="1" title="'+esc(_ttC)+'"':'')+
         ` style="width:${fieldWidths[field]||'80px'};max-width:${fieldWidths[field]||'80px'};font-size:.72rem;padding:.18rem .32rem;` +
@@ -7161,12 +7172,16 @@ function copenEnsalarCellChange(inp) {
   // Só LOCAL e REF disparam a marca (LAT/LONG seguem a mesma cor, pois
   // acompanham o LOCAL, mas não confirmam sozinhos a alocação).
   if (field === 'LOCAL') {
-    const _pL=_copenEnsData[id]._prevLocal, _nL=val.trim().toLowerCase();
-    if(_pL!==_nL){
-      const _em=typeof _espData!=='undefined'?Object.values(_espData).find(function(e){return !e._deleted&&(e.LOCAL||'').trim().toLowerCase()===_nL;}):null;
-      if(_em){_copenEnsData[id].LAT=_em.LAT?String(_em.LAT):'?';_copenEnsData[id].LONG=_em.LONG?String(_em.LONG):'?';_copenEnsData[id].REF=_em.REF||'?';}else{_copenEnsData[id].LAT='?';_copenEnsData[id].LONG='?';_copenEnsData[id].REF='?';}
-      _copenEnsData[id]._prevLocal=_nL;
-      const _tr2=inp.closest('tr');if(_tr2){['LAT','LONG','REF'].forEach(function(f){const _i2=_tr2.querySelector('input[data-field="'+f+'"]');if(_i2)_i2.value=_copenEnsData[id][f];});}
+    // Busca SEMPRE no Perfil dos Espacos da FT (sem depender de _prevLocal,
+    // que impedia a atualizacao quando o espaco era cadastrado depois).
+    _copenEnsData[id]._prevLocal = val.trim().toLowerCase();
+    _espAplicarNaLinha(_copenEnsData[id], true);
+    const _tr2 = inp.closest('tr');
+    if(_tr2){
+      ['LAT','LONG','REF'].forEach(function(f){
+        const _i2=_tr2.querySelector('input[data-field="'+f+'"]');
+        if(_i2) _i2.value = _copenEnsData[id][f] || '';
+      });
     }
     _copenEnsData[id]._localOk=true;
   }
@@ -7831,11 +7846,241 @@ function _espPersist(){
 }
 
 function _espLoadFB(){
-  try { if(typeof db!=='undefined'&&db){ db.ref(_ESP_FB).once('value').then(function(snap){ var d=snap.val(); if(d&&Object.keys(d).length){ _espData=d; try{localStorage.setItem('pen_espacos',JSON.stringify(d));}catch(ex){} var sp=document.getElementById('sp-espacos'); if(sp&&sp.classList.contains('active')) renderEspacos(); } else { _espPersist(); } }).catch(function(){}); } } catch(ex){}
+  try { if(typeof db!=='undefined'&&db){ db.ref(_ESP_FB).once('value').then(function(snap){ var d=snap.val(); if(d&&Object.keys(d).length){ _espData=d; try{localStorage.setItem('pen_espacos',JSON.stringify(d));}catch(ex){} var sp=document.getElementById('sp-espacos'); if(sp&&sp.classList.contains('active')) renderEspacos(); _espRefreshEnsalar(); } else { _espPersist(); } }).catch(function(){}); } } catch(ex){}
 }
 
 function _espStartSync(){
-  try { if(typeof db!=='undefined'&&db){ db.ref(_ESP_FB).on('value',function(snap){ var d=snap.val(); if(d&&Object.keys(d).length){ _espData=d; try{localStorage.setItem('pen_espacos',JSON.stringify(d));}catch(ex){} var sp=document.getElementById('sp-espacos'); if(sp&&sp.classList.contains('active')) renderEspacos(); } }); } } catch(ex){}
+  try { if(typeof db!=='undefined'&&db){ db.ref(_ESP_FB).on('value',function(snap){ var d=snap.val(); if(d&&Object.keys(d).length){ _espData=d; try{localStorage.setItem('pen_espacos',JSON.stringify(d));}catch(ex){} var sp=document.getElementById('sp-espacos'); if(sp&&sp.classList.contains('active')) renderEspacos(); _espRefreshEnsalar(); } }); } } catch(ex){}
+}
+
+
+// ═══════════════════════════════════════════════════════════════
+// VINCULO: PERFIL DOS ESPACOS DA FT  ->  ENSALAMENTO (LAT/LONG/REF)
+// O cadastro de espacos e a UNICA fonte de verdade de LAT, LONG e REF.
+// Sempre que o campo LOCAL de uma linha do ensalamento casar com um
+// espaco cadastrado, as tres colunas sao preenchidas automaticamente —
+// no carregamento, a cada renderizacao, ao digitar o LOCAL e tambem
+// quando a COPEN-FT cadastra ou edita um espaco.
+// ═══════════════════════════════════════════════════════════════
+function _espNorm(v){
+  return String(v==null?'':v)
+    .normalize('NFD').replace(/[\u0300-\u036f]/g,'')   // ignora acentos
+    .replace(/\s+/g,' ').trim().toLowerCase();
+}
+function _espChaveFlex(n){
+  // "Sala 03" == "sala 3" ; "Lab. 1" == "lab 1"
+  return String(n||'').replace(/[.\-_]/g,' ').replace(/\s+/g,' ')
+    .replace(/(^|\s)0+(\d)/g,'$1$2').trim();
+}
+function _espCatalogo(){
+  var m={};
+  try{
+    if(typeof _espData==='undefined'||!_espData) return m;
+    Object.keys(_espData).forEach(function(k){
+      var e=_espData[k];
+      if(!e||e._deleted||!e.LOCAL) return;
+      var n=_espNorm(e.LOCAL);
+      if(!n) return;
+      m[n]=e;
+      var f=_espChaveFlex(n);
+      if(f&&!m['~'+f]) m['~'+f]=e;
+    });
+  }catch(ex){}
+  return m;
+}
+function _espBuscar(local){
+  var n=_espNorm(local);
+  if(!n) return null;
+  var m=_espCatalogo();
+  return m[n] || m['~'+_espChaveFlex(n)] || null;
+}
+function _espCoordFmt(v){
+  if(v===0||v==='0') return '0.000000';
+  if(v===null||v===undefined||v==='') return '';
+  var n=parseFloat(String(v).replace(',','.'));
+  return isNaN(n) ? String(v).trim() : n.toFixed(6);
+}
+function _espNum(v){
+  var n=parseFloat(String(v==null?'':v).replace(',','.'));
+  return isNaN(n)?null:n;
+}
+// Aplica os dados do catalogo em UMA linha do ensalamento.
+// marcar = true  -> LOCAL sem correspondencia vira '?' (uso na digitacao)
+// marcar = false -> LOCAL sem correspondencia preserva o valor atual
+function _espAplicarNaLinha(rec, marcar){
+  if(!rec) return false;
+  var loc=String(rec.LOCAL||'').trim();
+  var mudou=false;
+  if(!loc){
+    if(marcar){
+      ['LAT','LONG','REF'].forEach(function(f){ if(rec[f]){ rec[f]=''; mudou=true; } });
+    }
+    return mudou;
+  }
+  var e=_espBuscar(loc);
+  if(!e){
+    if(marcar){
+      ['LAT','LONG','REF'].forEach(function(f){ if(rec[f]!=='?'){ rec[f]='?'; mudou=true; } });
+    }
+    return mudou;
+  }
+  var lat=_espCoordFmt(e.LAT), lon=_espCoordFmt(e.LONG);
+  var ref=(e.REF==null?'':String(e.REF)).trim();
+  // tolerancia de 5e-7 grau (~5 cm): evita reescrever coordenadas que ja
+  // coincidem com o catalogo apenas por diferenca de casas decimais
+  var a=_espNum(rec.LAT), b=_espNum(lat);
+  if(lat && (a===null||b===null||Math.abs(a-b)>5e-7)){ rec.LAT=lat; mudou=true; }
+  var c=_espNum(rec.LONG), d=_espNum(lon);
+  if(lon && (c===null||d===null||Math.abs(c-d)>5e-7)){ rec.LONG=lon; mudou=true; }
+  if(ref && String(rec.REF||'').trim()!==ref){ rec.REF=ref; mudou=true; }
+  return mudou;
+}
+// Aplica em um array OU num objeto de linhas
+function _espSyncRows(rows, marcar){
+  if(!rows) return 0;
+  var list = Array.isArray(rows) ? rows
+           : Object.keys(rows).map(function(k){ return rows[k]; });
+  var n=0;
+  list.forEach(function(r){ if(r && !r._deleted && _espAplicarNaLinha(r, !!marcar)) n++; });
+  return n;
+}
+// Lista de locais cadastrados (usada no datalist do campo LOCAL)
+function _espListaLocais(){
+  var out=[];
+  try{
+    if(typeof _espData==='undefined'||!_espData) return out;
+    Object.keys(_espData).forEach(function(k){
+      var e=_espData[k];
+      if(e&&!e._deleted&&e.LOCAL) out.push(String(e.LOCAL).trim());
+    });
+  }catch(ex){}
+  return out.filter(function(v,i,a){ return a.indexOf(v)===i; })
+            .sort(function(x,y){ return x.localeCompare(y,'pt-BR'); });
+}
+function _espDatalistHTML(id){
+  return '<datalist id="'+id+'">'
+    + _espListaLocais().map(function(l){
+        return '<option value="'+String(l).replace(/&/g,'&amp;').replace(/"/g,'&quot;')+'">';
+      }).join('')
+    + '</datalist>';
+}
+// Chamado sempre que o catalogo de espacos muda (cadastro, edicao,
+// exclusao ou sincronizacao vinda do Firebase)
+
+// ── Sincronizacao automatica apos cadastro/edicao de espaco ───────
+// Aplica o catalogo em memoria, redesenha as tabelas e — quando quem
+// esta logado e a COPEN-FT — GRAVA as linhas afetadas no Firebase e no
+// localStorage, para que gestores e painel publico recebam LAT/LONG/REF
+// sem precisar reabrir ou reeditar o campo LOCAL.
+let _espSyncTimer = null;
+let _espSyncEmAndamento = false;
+
+async function _espSincronizarEnsalar(motivo){
+  if(_espSyncEmAndamento) return 0;
+  _espSyncEmAndamento = true;
+  var alterados = [];
+  try{
+    // 1) aplica o catalogo nas linhas em memoria
+    if(typeof _copenEnsData!=='undefined' && _copenEnsData){
+      Object.keys(_copenEnsData).forEach(function(id){
+        var r=_copenEnsData[id];
+        if(!r || r._deleted) return;
+        if(_espAplicarNaLinha(r,false)){ if(!r.id) r.id=id; alterados.push(id); }
+      });
+    }
+    if(typeof ensalarData!=='undefined' && ensalarData) _espSyncRows(ensalarData,false);
+
+    // 2) redesenha o que estiver visivel
+    var t1=document.getElementById('cens-tbody');
+    if(t1 && t1.children.length && typeof copenEnsalarRender==='function') copenEnsalarRender();
+    var t2=document.getElementById('ensalar-tbody');
+    if(t2 && t2.children.length && typeof ensalarRender==='function') ensalarRender();
+    if(typeof relAtualizar==='function'){
+      var relArea=document.getElementById('area-rel');
+      if(relArea && relArea.classList.contains('active')){ try{ relAtualizar(); }catch(e){} }
+    }
+  }catch(ex){ console.warn('_espSincronizarEnsalar (memoria):', ex); }
+
+  // 3) grava — apenas na sessao da COPEN-FT
+  var ehCopen = !!(typeof currentUser!=='undefined' && currentUser && currentUser.role==='copen');
+  if(!ehCopen || !alterados.length){ _espSyncEmAndamento=false; return alterados.length; }
+
+  var statusEl = document.getElementById('cens-save-status');
+  var _lsPr  = (typeof LS==='function' ? LS('config/prazos') : null) || {};
+  var refAno = _lsPr.refAno || prazosData.refAno || '';
+  var refSem = _lsPr.refSem || prazosData.refSem || '';
+  var novoAno= _lsPr.ano    || prazosData.ano    || '2026';
+  var novoSem= _lsPr.sem    || prazosData.sem    || '1';
+  var fullKey   = (refAno && refSem) ? ('ensalar_copen_full/' + refAno + '-' + refSem) : null;
+  var legacyKey = 'ensalar_copen/' + novoAno + '-' + novoSem;
+
+  if(!fullKey){
+    if(statusEl) statusEl.textContent =
+      '⚠️ ' + alterados.length + ' local(is) atualizado(s) na tela — configure o Semestre de Referência para sincronizar.';
+    _espSyncEmAndamento=false;
+    return alterados.length;
+  }
+
+  if(statusEl) statusEl.textContent = '💾 Atualizando ' + alterados.length + ' registro(s) com os dados do Perfil dos Espaços…';
+
+  try{
+    var curFull   = (typeof LS==='function' ? LS(fullKey)   : null) || {};
+    var curLegacy = (typeof LS==='function' ? LS(legacyKey) : null) || {};
+    var gravacoes = [];
+
+    alterados.forEach(function(id){
+      var row = normalizeEnsCmt(Object.assign({}, _copenEnsData[id]));
+      if(!row.id) row.id = id;
+      row.updatedAt      = Date.now();
+      row.updatedBy      = (copenCfg && copenCfg.email) || 'COPEN-FT';
+      row._copenOverride = true;
+      row._lastField     = 'LOCAL_ESPACOS';
+      if(!row._status || row._status==='original') row._status='edited';
+      _copenEnsData[id]  = row;
+      curFull[id]   = row;
+      curLegacy[id] = row;
+      gravacoes.push(dbSet(fullKey   + '/' + id, row));
+      gravacoes.push(dbSet(legacyKey + '/' + id, row));
+    });
+
+    if(typeof LSset==='function'){ LSset(fullKey, curFull); LSset(legacyKey, curLegacy); }
+    await Promise.all(gravacoes);
+
+    if(statusEl){
+      statusEl.textContent = '✅ ' + alterados.length
+        + ' registro(s) atualizado(s) pelo Perfil dos Espaços às '
+        + new Date().toLocaleTimeString('pt-BR',{hour:'2-digit',minute:'2-digit',second:'2-digit'})
+        + ' — sincronizado com gestores e painel público';
+    }
+    if(typeof logAudit==='function'){
+      logAudit('editar_ensalamento',
+               alterados.length + ' registro(s) — Perfil dos Espaços',
+               'LOCAL/LAT/LONG/REF', '', motivo || 'cadastro de espaço');
+    }
+  }catch(e){
+    console.warn('_espSincronizarEnsalar (gravacao):', e);
+    if(statusEl) statusEl.textContent =
+      '⚠️ Locais atualizados localmente — falha ao sincronizar com o Firebase.';
+  }
+  _espSyncEmAndamento=false;
+  return alterados.length;
+}
+
+// Agenda a sincronizacao (agrupa cadastros/edicoes em sequencia)
+function _espAgendarSync(motivo){
+  clearTimeout(_espSyncTimer);
+  _espSyncTimer = setTimeout(function(){ _espSincronizarEnsalar(motivo); }, 250);
+}
+
+function _espRefreshEnsalar(){
+  try{
+    if(typeof _copenEnsData!=='undefined'&&_copenEnsData) _espSyncRows(_copenEnsData,false);
+    if(typeof ensalarData  !=='undefined'&&ensalarData)   _espSyncRows(ensalarData,false);
+    var t1=document.getElementById('cens-tbody');
+    if(t1&&t1.children.length&&typeof copenEnsalarRender==='function') copenEnsalarRender();
+    var t2=document.getElementById('ensalar-tbody');
+    if(t2&&t2.children.length&&typeof ensalarRender==='function') ensalarRender();
+  }catch(ex){}
 }
 
 function renderEspacos(){
@@ -7879,9 +8124,10 @@ function _espSave(editId){
   if(!obj.LOCAL){ alert('O campo Nome do Local e obrigatorio.'); return; }
   if(editId){ Object.assign(_espData[editId],obj); _espData[editId]._id=editId; } else { var nid='esp_'+Date.now(); obj._id=nid; _espData[nid]=obj; }
   _espPersist(); _espCloseModal(); renderEspacos();
+  _espAgendarSync(editId ? 'edição de espaço' : 'novo espaço cadastrado');
 }
 
-function _espDelete(id){ var e=_espData[id]; if(!e) return; if(!confirm('Excluir "'+(e.LOCAL||id)+'"?')) return; _espData[id]._deleted=true; _espPersist(); renderEspacos(); }
+function _espDelete(id){ var e=_espData[id]; if(!e) return; if(!confirm('Excluir "'+(e.LOCAL||id)+'"?')) return; _espData[id]._deleted=true; _espPersist(); renderEspacos(); _espAgendarSync('exclusão de espaço'); }
 
 var _origShowSubCad=window.showSubCad;
 window.showSubCad=function(name){ if(_origShowSubCad)_origShowSubCad(name); if(name==='espacos'){_espLoadFB();renderEspacos();} };
