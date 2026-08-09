@@ -1765,10 +1765,34 @@ function ensCmtValue(row){
   }
   return '';
 }
+// Campos padronizados em CAIXA ALTA em todo o sistema.
+// Declarado com var (e a lista repetida dentro da funcao) porque
+// normalizeEnsCmt roda ainda durante a carga inicial, antes de qualquer
+// const deste bloco ser inicializada.
+var ENS_CAMPOS_MAIUSCULOS = ['DISC','PROF'];
+function ensMaiusculo(v){
+  if(v===null||v===undefined) return v;
+  var t=String(v);
+  if(!t.trim()) return t;
+  try { return t.toLocaleUpperCase('pt-BR'); } catch(e){ return t.toUpperCase(); }
+}
+// Aplica a padronizacao nos campos definidos acima
+function ensPadronizaTexto(row){
+  if(!row||typeof row!=='object') return row;
+  var campos = ['DISC','PROF'];
+  for(var i=0;i<campos.length;i++){
+    var f=campos[i];
+    if(row[f]!==null&&row[f]!==undefined&&row[f]!=='') row[f]=ensMaiusculo(row[f]);
+  }
+  return row;
+}
 function normalizeEnsCmt(row){
   if(!row) return row;
   const v=ensCmtValue(row);
   if(v) row.CAPMAXTUR=v;
+  // DISC e PROF sempre em maiusculas — normalizeEnsCmt e o ponto por onde
+  // passam carga inicial, importacao, merges, salvamento e relatorios.
+  ensPadronizaTexto(row);
   return row;
 }
 
@@ -5835,6 +5859,14 @@ function ensalarQueueSave(id) {
 function ensalarCellChange(id, field, val) {
   if (!ensalarEditing) return;
   if (!ensalarData[id]) return;
+  // Padroniza DISC e PROF em caixa alta
+  if (typeof ENS_CAMPOS_MAIUSCULOS !== 'undefined'
+      && ENS_CAMPOS_MAIUSCULOS.includes(field)) {
+    val = ensMaiusculo(val);
+    const _inp = document.querySelector(
+      '#ensalar-tbody input[data-id="' + id + '"][data-field="' + field + '"]');
+    if (_inp && _inp.value !== val) _inp.value = val;
+  }
   ensalarData[id][field] = val;
   // Mark row as edited if it was original
   if (ensalarData[id]._status === 'original') ensalarData[id]._status = 'edited';
@@ -7675,6 +7707,12 @@ document.addEventListener('click',function(e){if(_cpenBalloon&&!_cpenBalloon.con
 function _refreshConflicts(){_buildConflictMap();_applyConflictVisuals();}
 
 function copenEnsalarCellChange(inp) {
+  // Padroniza DISC e PROF em caixa alta no momento da digitacao
+  if (typeof ENS_CAMPOS_MAIUSCULOS !== 'undefined'
+      && ENS_CAMPOS_MAIUSCULOS.includes(inp.dataset.field)) {
+    const _up = ensMaiusculo(inp.value);
+    if (_up !== inp.value) inp.value = _up;
+  }
   const id    = inp.dataset.id;
   const field = inp.dataset.field;
   const val   = inp.value;
