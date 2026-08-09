@@ -7288,22 +7288,77 @@ function _localKey(v){
   if(!t || _LOCAL_VAZIO.indexOf(t)>=0) return '';
   return t.replace(/(^|\s)0+(\d)/g,'$1$2');
 }
-// Duas linhas sao a MESMA aula (turma agrupada / oferta compartilhada)
-// quando tratam da mesma disciplina. Nesses casos dividir a sala e
-// intencional e NAO deve ser acusado como conflito.
-function _mesmaAula(a,b){
-  const cA=String(a.CODISC||'').trim().toUpperCase();
-  const cB=String(b.CODISC||'').trim().toUpperCase();
-  if(cA&&cB&&cA===cB) return true;                       // mesmo codigo
-  if(!cA&&!cB){                                          // sem codigo: usa o nome
-    const nA=String(a.DISC||'').normalize('NFD').replace(/[\u0300-\u036f]/g,'')
-              .replace(/\s+/g,' ').trim().toLowerCase();
-    const nB=String(b.DISC||'').normalize('NFD').replace(/[\u0300-\u036f]/g,'')
-              .replace(/\s+/g,' ').trim().toLowerCase();
-    if(nA&&nA===nB) return true;
-  }
+// ── Identidade de professor, turma e disciplina ───────────────────
+const _PROF_INDEFINIDO = ['','-','--','?','x','n/a','na','a definir','adefinir',
+  'a contratar','definir','em definicao','professor a definir','nao definido',
+  'indefinido','sem professor','a designar'];
+function _txtKey(v){
+  return String(v==null?'':v).normalize('NFD').replace(/[\u0300-\u036f]/g,'')
+    .replace(/[.,;:()\[\]]/g,' ').replace(/\s+/g,' ').trim().toLowerCase();
+}
+function _profKey(v){
+  const t=_txtKey(v);
+  return _PROF_INDEFINIDO.indexOf(t)>=0 ? '' : t;
+}
+function _mesmoProf(a,b){
+  const pA=_profKey(a.PROF), pB=_profKey(b.PROF);
+  if(!pA||!pB) return null;              // desconhecido: nao da para julgar
+  if(pA===pB) return true;
+  // tolera "Ana C. de Medeiros" x "Ana Carolina C. de Medeiros":
+  // mesmo primeiro e ultimo nome ja caracterizam a mesma pessoa
+  const tA=pA.split(' ').filter(Boolean), tB=pB.split(' ').filter(Boolean);
+  if(tA.length>1&&tB.length>1&&tA[0]===tB[0]&&tA[tA.length-1]===tB[tB.length-1]) return true;
   return false;
 }
+function _mesmaDisciplina(a,b){
+  const cA=String(a.CODISC||'').trim().toUpperCase();
+  const cB=String(b.CODISC||'').trim().toUpperCase();
+  if(cA&&cB) return cA===cB;
+  const nA=_txtKey(a.DISC), nB=_txtKey(b.DISC);
+  return !!nA && nA===nB;
+}
+// CODTUR pode vir composto ("AU1, CV1"): considera igual se houver
+// qualquer codigo de turma em comum.
+function _mesmaTurma(a,b){
+  const sp=v=>_txtKey(v).split(/[,;\/|+]/).map(x=>x.trim()).filter(Boolean);
+  const tA=sp(a.CODTUR), tB=sp(b.CODTUR);
+  if(!tA.length||!tB.length) return null;
+  return tA.some(x=>tB.indexOf(x)>=0);
+}
+
+// ── Classificacao do confronto entre duas linhas na MESMA sala,
+//    no MESMO dia, com horarios que se sobrepoem ────────────────────
+//   null       -> turma agrupada: dividir a sala e intencional
+//   'atencao'  -> mesmo professor com disciplinas/turmas distintas
+//   'conflito' -> professores diferentes: colisao real de sala
+function _classificarConfronto(a,b){
+  const mesmoProf = _mesmoProf(a,b);          // true | false | null
+  const mesmaDisc = _mesmaDisciplina(a,b);
+  const mesmaTur  = _mesmaTurma(a,b);         // true | false | null
+
+  if(mesmoProf === true){
+    // Mesmo professor, mesma disciplina OU mesma turma => oferta
+    // compartilhada entre cursos. Nao e conflito.
+    if(mesmaDisc || mesmaTur === true) return null;
+    // Mesmo professor em disciplinas diferentes no mesmo horario:
+    // possivel agrupamento, mas merece verificacao.
+    return { nivel:'atencao',
+             motivo:'Mesmo professor em disciplinas diferentes no mesmo horário e local' };
+  }
+  if(mesmoProf === false){
+    // Professores diferentes dividindo a mesma sala no mesmo horario.
+    return { nivel:'conflito',
+             motivo: mesmaDisc
+               ? 'Mesma disciplina com professores diferentes no mesmo horário e local'
+               : 'Disciplinas e professores diferentes no mesmo horário e local' };
+  }
+  // Professor nao informado em pelo menos um dos lados
+  if(mesmaDisc && mesmaTur !== false) return null;   // mesma oferta: agrupada
+  return { nivel:'atencao',
+           motivo:'Professor não informado — verifique se é a mesma oferta' };
+}
+// Compatibilidade com chamadas antigas
+function _mesmaAula(a,b){ return _classificarConfronto(a,b) === null; }
 
 function _buildConflictMap(){
   const data=Object.values(_copenEnsData||{}).filter(r=>r&&!r._deleted);
@@ -7328,7 +7383,8 @@ function _buildConflictMap(){
       const a=lista[i];
       for(let j=i+1;j<lista.length;j++){
         const b=lista[j];
-        if(_mesmaAula(a,b)) continue;                  // turma agrupada
+        const cls=_classificarConfronto(a,b);
+        if(!cls) continue;                             // turma agrupada
         if(a._conflictIgnored&&b._conflictIgnored) continue;
         for(let d=0;d<_DIAS_ENS.length;d++){
           const dia=_DIAS_ENS[d];
@@ -7340,10 +7396,12 @@ function _buildConflictMap(){
           if(!map[b.id])map[b.id]=[];
           map[a.id].push({DISC:b.DISC||b.CODISC||'?',CURSO:b.CURSO||'?',
             CODISC:b.CODISC||'',CODTUR:String(b.CODTUR||'').trim().toUpperCase(),
-            PROF:b.PROF||'',dia:dia,hCur:a[dia],hOut:b[dia],mins:mins,LOCAL:b.LOCAL||''});
+            PROF:b.PROF||'',dia:dia,hCur:a[dia],hOut:b[dia],mins:mins,LOCAL:b.LOCAL||'',
+            nivel:cls.nivel,motivo:cls.motivo});
           map[b.id].push({DISC:a.DISC||a.CODISC||'?',CURSO:a.CURSO||'?',
             CODISC:a.CODISC||'',CODTUR:String(a.CODTUR||'').trim().toUpperCase(),
-            PROF:a.PROF||'',dia:dia,hCur:b[dia],hOut:a[dia],mins:mins,LOCAL:a.LOCAL||''});
+            PROF:a.PROF||'',dia:dia,hCur:b[dia],hOut:a[dia],mins:mins,LOCAL:a.LOCAL||'',
+            nivel:cls.nivel,motivo:cls.motivo});
         }
       }
     }
@@ -7365,7 +7423,8 @@ function _detectarConflitoLocal(id, local){
   Object.values(_copenEnsData||{}).forEach(function(b){
     if(!b||b._deleted||b.id===id) return;
     if(_localKey(b.LOCAL)!==k) return;
-    if(_mesmaAula(alvo,b)) return;
+    const cls=_classificarConfronto(alvo,b);
+    if(!cls) return;
     if(alvo._conflictIgnored&&b._conflictIgnored) return;
     _DIAS_ENS.forEach(function(dia){
       const hB=_parseHorarios(b[dia]);
@@ -7374,22 +7433,33 @@ function _detectarConflitoLocal(id, local){
       out.push({DISC:b.DISC||b.CODISC||'?',CURSO:b.CURSO||'?',
         CODISC:b.CODISC||'',CODTUR:String(b.CODTUR||'').trim().toUpperCase(),
         PROF:b.PROF||'',dia:dia,hCur:alvo[dia],hOut:b[dia],
-        mins:_minutosSobrepostos(hA[dia],hB),LOCAL:b.LOCAL||''});
+        mins:_minutosSobrepostos(hA[dia],hB),LOCAL:b.LOCAL||'',
+        nivel:cls.nivel,motivo:cls.motivo});
     });
   });
   return out;
 }
 
 // Contador de conflitos ao lado do total de registros
+function _nivelLinha(cs){
+  if(!cs||!cs.length) return null;
+  return cs.some(c=>c.nivel==='conflito') ? 'conflito' : 'atencao';
+}
 function _censAtualizarContadorConflitos(map){
   try{
     const el=document.getElementById('cens-count');
     if(!el) return;
     const base=(el.textContent||'').split('·')[0].trim();
-    const n=Object.keys(map||{}).length;
-    el.innerHTML = n
-      ? base+' <span style="color:#b45309;font-weight:800" title="Linhas com conflito de sala. Clique no ⚠️ da coluna LOCAL para ver os detalhes.">· \u26a0\ufe0f '+n+' em conflito</span>'
-      : base+' <span style="color:#1a936f;font-weight:700">· sem conflitos de sala</span>';
+    let nC=0,nA=0;
+    Object.keys(map||{}).forEach(function(id){
+      const nv=_nivelLinha(map[id]);
+      if(nv==='conflito') nC++; else if(nv==='atencao') nA++;
+    });
+    let html=base;
+    if(nC) html+=' <span style="color:#b45309;font-weight:800" title="Professores diferentes na mesma sala, dia e horário.">· \u26a0\ufe0f '+nC+' em conflito</span>';
+    if(nA) html+=' <span style="color:#1d4ed8;font-weight:700" title="Mesmo professor ou professor não informado — confirme se é oferta agrupada.">· \u2139\ufe0f '+nA+' a verificar</span>';
+    if(!nC&&!nA) html+=' <span style="color:#1a936f;font-weight:700">· sem conflitos de sala</span>';
+    el.innerHTML=html;
   }catch(ex){}
 }
 function _applyConflictVisuals(){
@@ -7398,16 +7468,20 @@ function _applyConflictVisuals(){
   tb.querySelectorAll('input[data-field="LOCAL"]').forEach(inp=>{
     const id=inp.dataset.id,td=inp.closest('td'),cs=map[id];
     if(cs&&cs.length){
-      inp.style.border='2px solid #f59e0b';
-      inp.style.background='#fff3cd';
-      inp.style.animation='_conflictPulse 1.2s ease-in-out infinite';
-      const ttL=cs.map(c=>'- '+c.DISC+' ('+c.CURSO+') '+(_DIA_LABEL[c.dia]||c.dia)+': '+c.hCur+' x '+c.hOut);
-      inp.title='CONFLITO DE SALA:\n'+ttL.join('\n');
-      inp.setAttribute('data-conflict','1');
+      const _nv=_nivelLinha(cs);
+      const _grave=_nv==='conflito';
+      inp.style.border=_grave?'2px solid #f59e0b':'2px solid #60a5fa';
+      inp.style.background=_grave?'#fff3cd':'#eff6ff';
+      inp.style.animation=_grave?'_conflictPulse 1.2s ease-in-out infinite':'';
+      const ttL=cs.map(c=>'- ['+(c.nivel==='conflito'?'CONFLITO':'VERIFICAR')+'] '
+        +c.DISC+' ('+c.CURSO+')'+(c.PROF?' — '+c.PROF:'')+' '
+        +(_DIA_LABEL[c.dia]||c.dia)+': '+c.hCur+' x '+c.hOut);
+      inp.title=(_grave?'CONFLITO DE SALA:':'VERIFICAR OCUPAÇÃO DA SALA:')+'\n'+ttL.join('\n');
+      inp.setAttribute('data-conflict',_grave?'1':'2');
       if(td&&!td.querySelector('.cpen-conflict-icon')){
         const ic=document.createElement('span');
         ic.className='cpen-conflict-icon';
-        ic.textContent='\u26a0\ufe0f';
+        ic.textContent=_grave?'\u26a0\ufe0f':'\u2139\ufe0f';
         ic.title=inp.title;
         ic.style.cssText='cursor:pointer;font-size:.88rem;margin-right:3px;vertical-align:middle';
         const _cap=id;
@@ -7429,6 +7503,52 @@ function _applyConflictVisuals(){
   s.textContent='@keyframes _conflictPulse{0%,100%{background:#fff3cd;border-color:#f59e0b}50%{background:#fcd34d;border-color:#d97706}}';
   document.head.appendChild(s);
 })();
+// ── Auxiliares de destaque usados na checagem imediata do LOCAL ──
+// Estavam sendo chamados mas nunca haviam sido definidos: cada chamada
+// lancava ReferenceError e abortava a verificacao logo apos digitar a sala.
+function _flashConflictInput(inp){
+  if(!inp) return;
+  try{
+    const bd=inp.style.border, bg=inp.style.background;
+    inp.style.transition='background .18s ease, border-color .18s ease';
+    inp.style.border='2px solid #f59e0b';
+    inp.style.background='#fde68a';
+    setTimeout(function(){ inp.style.border=bd; inp.style.background=bg; }, 900);
+  }catch(e){}
+}
+let _cpenTooltip=null;
+function _hideConflictTooltip(){
+  try{ if(_cpenTooltip){ _cpenTooltip.remove(); _cpenTooltip=null; } }catch(e){}
+}
+function _showConflictTooltip(anchorEl, cs){
+  _hideConflictTooltip();
+  if(!anchorEl||!cs||!cs.length) return;
+  try{
+    const grave=cs.some(function(c){ return c.nivel!=='atencao'; });
+    const d=document.createElement('div');
+    d.id='_cpen-conflict-tip';
+    d.style.cssText='position:fixed;z-index:99998;max-width:340px;'
+      +'background:'+(grave?'#fffbeb':'#eff6ff')+';'
+      +'border:1.5px solid '+(grave?'#f59e0b':'#60a5fa')+';border-radius:10px;'
+      +'padding:.5rem .7rem;font-size:.72rem;line-height:1.45;'
+      +'color:'+(grave?'#78350f':'#1e3a8a')+';box-shadow:0 6px 22px rgba(0,0,0,.18);'
+      +'pointer-events:none';
+    d.innerHTML='<b>'+(grave?'\u26a0\ufe0f Conflito de sala':'\u2139\ufe0f Verificar ocupação')+'</b><br>'
+      + cs.slice(0,4).map(function(c){
+          return '• '+esc(c.DISC)+' ('+esc(c.CURSO)+')'+(c.PROF?' — '+esc(c.PROF):'')
+               + ' · '+((typeof _DIA_LABEL!=='undefined'&&_DIA_LABEL[c.dia])||c.dia)
+               + ' '+esc(c.hOut);
+        }).join('<br>')
+      + (cs.length>4 ? '<br>… e mais '+(cs.length-4) : '');
+    document.body.appendChild(d);
+    _cpenTooltip=d;
+    const r=anchorEl.getBoundingClientRect();
+    let left=r.left; if(left+350>window.innerWidth) left=window.innerWidth-354;
+    d.style.top=(r.bottom+6)+'px';
+    d.style.left=Math.max(4,left)+'px';
+    setTimeout(_hideConflictTooltip, 7000);
+  }catch(e){}
+}
 let _cpenBalloon=null;
 // Balão de conflito com botões de ação
 function _showConflictBalloon(anchorEl, cs, recordId) {
@@ -7449,15 +7569,20 @@ function _showConflictBalloon(anchorEl, cs, recordId) {
   ].join(';');
 
   // Conflitos listados
+  const _grave = cs.some(c => c.nivel !== 'atencao');
   let rows = '';
   for (const c of cs) {
     rows += '<div style="padding:.3rem 0;border-bottom:1px dashed #fde68a">';
+    rows += (c.nivel === 'atencao'
+      ? '<span style="background:#dbeafe;color:#1e40af;border-radius:5px;padding:0 .3rem;font-size:.66rem;font-weight:800">VERIFICAR</span> '
+      : '<span style="background:#fde68a;color:#92400e;border-radius:5px;padding:0 .3rem;font-size:.66rem;font-weight:800">CONFLITO</span> ');
     rows += '<b>' + esc(c.DISC) + '</b> &mdash; ' + esc(c.CURSO);
     if (c.CODTUR) rows += ' <span style="font-size:.72rem">(Turma ' + esc(c.CODTUR) + ')</span>';
     if (c.CODISC) rows += ' <span style="font-size:.7rem;color:#a16207">[' + esc(c.CODISC) + ']</span>';
     rows += '<br>\ud83d\udcc5 ' + (_DIA_LABEL[c.dia] || c.dia) + ': <em>' + esc(c.hCur) + '</em> \u00d7 <em>' + esc(c.hOut) + '</em>';
     if (c.mins) rows += ' <b style="color:#b45309">(' + c.mins + ' min sobrepostos)</b>';
     if (c.PROF) rows += '<br><span style="font-size:.72rem">\ud83d\udc64 ' + esc(c.PROF) + '</span>';
+    if (c.motivo) rows += '<br><span style="font-size:.7rem;opacity:.85">' + esc(c.motivo) + '</span>';
     rows += '</div>';
   }
 
@@ -7473,8 +7598,9 @@ function _showConflictBalloon(anchorEl, cs, recordId) {
     + '\u270f\ufe0f Alterar local</button>';
 
   div.innerHTML =
-    '<div style="font-weight:800;font-size:.85rem;margin-bottom:.35rem;color:#92400e">'
-    + '\u26a0\ufe0f Conflito de sala detectado</div>'
+    '<div style="font-weight:800;font-size:.85rem;margin-bottom:.35rem;color:' + (_grave ? '#92400e' : '#1e40af') + '">'
+    + (_grave ? '\u26a0\ufe0f Conflito de sala detectado'
+              : '\u2139\ufe0f Verifique a ocupação desta sala') + '</div>'
     + rows
     + '<div style="margin-top:.65rem;font-size:.72rem;color:#a16207;margin-bottom:.55rem">'
     + 'O que deseja fazer?</div>'
@@ -7599,8 +7725,30 @@ function copenEnsalarCellChange(inp) {
         _flashConflictInput(_localInp);
         _showConflictTooltip(_localInp, _conflicts2);
         _copenEnsData[id]._conflito = true;
+        // Checagem imediata ao lancar o LOCAL: abre o balao com os detalhes
+        // e resume o resultado, para a COPEN-FT decidir na hora.
+        if (field === 'LOCAL') {
+          const _grv = _conflicts2.filter(function(c){ return c.nivel !== 'atencao'; });
+          const _atc = _conflicts2.filter(function(c){ return c.nivel === 'atencao'; });
+          const _sala = _copenEnsData[id].LOCAL || 'este local';
+          if (typeof _showConflictBalloon === 'function')
+            _showConflictBalloon(_localInp, _conflicts2, id);
+          if (typeof toast === 'function') {
+            if (_grv.length) {
+              toast('\u26a0\ufe0f Conflito em ' + _sala + ': ' + _grv.length
+                + ' choque(s) com professor diferente no mesmo dia e horário.', 'err');
+            } else if (_atc.length) {
+              toast('\u2139\ufe0f ' + _sala + ': ' + _atc.length
+                + ' ocorrência(s) a verificar — mesmo professor ou professor não informado.', 'warn');
+            }
+          }
+        }
       } else {
         _copenEnsData[id]._conflito = false;
+        if (field === 'LOCAL' && (_copenEnsData[id].LOCAL || '').trim()
+            && typeof toast === 'function') {
+          toast('\u2705 ' + _copenEnsData[id].LOCAL + ' livre nos dias e horários desta disciplina.', 'ok');
+        }
       }
     }, 400);
   }
