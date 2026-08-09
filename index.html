@@ -6966,39 +6966,172 @@ const _censSaveTimers = {};
 // Deteccao de Conflito de Sala — COPEN-FT
 const _DIAS_ENS=['2A','3A','4A','5A','6A'];
 const _DIA_LABEL={'2A':'2\u00aa feira','3A':'3\u00aa feira','4A':'4\u00aa feira','5A':'5\u00aa feira','6A':'6\u00aa feira'};
-function _parseHorario(str){
-  if(!str||str.trim()==='-'||!str.trim())return null;
-  const m=str.trim().match(/^(\d+)h(\d+)?-(\d+)h(\d+)?$/i);
-  if(!m)return null;
-  const s=parseInt(m[1])+(m[2]?parseInt(m[2])/60:0);
-  const e=parseInt(m[3])+(m[4]?parseInt(m[4])/60:0);
-  return s<e?{s,e}:null;
+// ── Leitura de horarios ───────────────────────────────────────────
+// Aceita: 08h-10h | 8h-10h | 08h10-10h00 | 08:00-10:00 | 8 h as 10 h |
+//         08h-10h e 14h-16h | 08h-10h; 14h-16h | 08h-10h / 14h-16h
+// Retorna SEMPRE uma lista de intervalos {s,e} em horas decimais.
+const _HORA_VAZIA = ['', '-', '--', '—', '?', 'x', 'n/a', 'na', 'nao', 'não',
+                     'sem horario', 'sem horário', 'a definir', 'adefinir'];
+function _parseHorarios(str){
+  if(str===null||str===undefined) return [];
+  let t = String(str).trim().toLowerCase();
+  if(!t || _HORA_VAZIA.indexOf(t)>=0) return [];
+  t = t.normalize('NFD').replace(/[\u0300-\u036f]/g,'');
+  // separadores de intervalo interno viram '-'
+  t = t.replace(/\s*(?:as|ate|a)\s*/g,'-').replace(/[–—]/g,'-');
+  // separadores entre intervalos multiplos viram ';'
+  t = t.replace(/\s*(?:e|,|\/|\||\+)\s*/g,';');
+  const out=[];
+  t.split(';').forEach(function(part){
+    const p=part.trim();
+    if(!p) return;
+    const m=p.match(/^(\d{1,2})\s*(?:h|:)?\s*(\d{2})?\s*-\s*(\d{1,2})\s*(?:h|:)?\s*(\d{2})?\s*h?$/);
+    if(!m) return;
+    let s=parseInt(m[1],10)+(m[2]?parseInt(m[2],10)/60:0);
+    let e=parseInt(m[3],10)+(m[4]?parseInt(m[4],10)/60:0);
+    if(isNaN(s)||isNaN(e)) return;
+    if(s>=24||e>24) return;
+    if(e<=s) return;                       // intervalo invalido/invertido
+    out.push({s:s,e:e});
+  });
+  return out;
 }
-function _horariosConflitam(a,b){return a&&b&&a.s<b.e&&b.s<a.e;}
+// Compatibilidade: devolve o primeiro intervalo (usado em outros pontos)
+function _parseHorario(str){ const a=_parseHorarios(str); return a.length?a[0]:null; }
+function _horariosConflitam(a,b){
+  if(!a||!b) return false;
+  const la=Array.isArray(a)?a:[a], lb=Array.isArray(b)?b:[b];
+  for(let i=0;i<la.length;i++)
+    for(let j=0;j<lb.length;j++)
+      if(la[i]&&lb[j]&&la[i].s<lb[j].e&&lb[j].s<la[i].e) return true;
+  return false;
+}
+// Sobreposicao em minutos (para exibir a gravidade no balao)
+function _minutosSobrepostos(la,lb){
+  let max=0;
+  (la||[]).forEach(function(x){ (lb||[]).forEach(function(y){
+    const ini=Math.max(x.s,y.s), fim=Math.min(x.e,y.e);
+    if(fim>ini) max=Math.max(max,(fim-ini)*60);
+  });});
+  return Math.round(max);
+}
+
+// ── Identidade do LOCAL ───────────────────────────────────────────
+// Ignora acentos, caixa, espacos repetidos e zeros a esquerda, de modo
+// que "Sala 01", "sala 1" e "SALA  01" sejam a MESMA sala — mas
+// "Sala 01 da Pos" continue sendo outra.
+const _LOCAL_VAZIO = ['', '-', '--', '—', '?', 'x', 'n/a', 'na',
+                      'a definir', 'adefinir', 'sem local', 'nao definido',
+                      'não definido', 'indefinido'];
+function _localKey(v){
+  let t=String(v==null?'':v).normalize('NFD').replace(/[\u0300-\u036f]/g,'')
+        .replace(/[.\-_]/g,' ').replace(/\s+/g,' ').trim().toLowerCase();
+  if(!t || _LOCAL_VAZIO.indexOf(t)>=0) return '';
+  return t.replace(/(^|\s)0+(\d)/g,'$1$2');
+}
+// Duas linhas sao a MESMA aula (turma agrupada / oferta compartilhada)
+// quando tratam da mesma disciplina. Nesses casos dividir a sala e
+// intencional e NAO deve ser acusado como conflito.
+function _mesmaAula(a,b){
+  const cA=String(a.CODISC||'').trim().toUpperCase();
+  const cB=String(b.CODISC||'').trim().toUpperCase();
+  if(cA&&cB&&cA===cB) return true;                       // mesmo codigo
+  if(!cA&&!cB){                                          // sem codigo: usa o nome
+    const nA=String(a.DISC||'').normalize('NFD').replace(/[\u0300-\u036f]/g,'')
+              .replace(/\s+/g,' ').trim().toLowerCase();
+    const nB=String(b.DISC||'').normalize('NFD').replace(/[\u0300-\u036f]/g,'')
+              .replace(/\s+/g,' ').trim().toLowerCase();
+    if(nA&&nA===nB) return true;
+  }
+  return false;
+}
+
 function _buildConflictMap(){
-  const data=Object.values(_copenEnsData||{}).filter(r=>!r._deleted);
+  const data=Object.values(_copenEnsData||{}).filter(r=>r&&!r._deleted);
   const map={};
-  for(let i=0;i<data.length;i++){
-    const a=data[i];if(!a.LOCAL||!a.LOCAL.trim())continue;
-    const lA=a.LOCAL.trim().toLowerCase();
-    for(let j=i+1;j<data.length;j++){
-      const b=data[j];if(!b.LOCAL||!b.LOCAL.trim())continue;
-      if(b.LOCAL.trim().toLowerCase()!==lA)continue;
-      const tA=(a.CODTUR||'').trim().toUpperCase();
-      const tB=(b.CODTUR||'').trim().toUpperCase();
-      if(tA&&tB&&tA===tB)continue;
-      if(a._conflictIgnored&&b._conflictIgnored)continue;
-      for(const dia of _DIAS_ENS){
-        const hA=_parseHorario(a[dia]),hB=_parseHorario(b[dia]);
-        if(!_horariosConflitam(hA,hB))continue;
-        if(!map[a.id])map[a.id]=[];
-        if(!map[b.id])map[b.id]=[];
-        map[a.id].push({DISC:b.DISC||b.CODISC||'?',CURSO:b.CURSO||'?',CODTUR:tB,dia,hCur:a[dia],hOut:b[dia]});
-        map[b.id].push({DISC:a.DISC||a.CODISC||'?',CURSO:a.CURSO||'?',CODTUR:tA,dia,hCur:b[dia],hOut:a[dia]});
+  // Indexa por sala → uma unica passada por sala, em vez de comparar
+  // todos contra todos (348 registros = ~60 mil pares no modelo antigo).
+  const porSala={};
+  data.forEach(function(r){
+    const k=_localKey(r.LOCAL);
+    if(!k) return;                                     // sala vazia/"?" nao conflita
+    (porSala[k]=porSala[k]||[]).push(r);
+  });
+  Object.keys(porSala).forEach(function(sala){
+    const lista=porSala[sala];
+    // pre-calcula os horarios de cada linha (evita reparse em O(n²))
+    const hor=lista.map(function(r){
+      const h={};
+      _DIAS_ENS.forEach(function(d){ h[d]=_parseHorarios(r[d]); });
+      return h;
+    });
+    for(let i=0;i<lista.length;i++){
+      const a=lista[i];
+      for(let j=i+1;j<lista.length;j++){
+        const b=lista[j];
+        if(_mesmaAula(a,b)) continue;                  // turma agrupada
+        if(a._conflictIgnored&&b._conflictIgnored) continue;
+        for(let d=0;d<_DIAS_ENS.length;d++){
+          const dia=_DIAS_ENS[d];
+          const hA=hor[i][dia], hB=hor[j][dia];
+          if(!hA.length||!hB.length) continue;
+          if(!_horariosConflitam(hA,hB)) continue;
+          const mins=_minutosSobrepostos(hA,hB);
+          if(!map[a.id])map[a.id]=[];
+          if(!map[b.id])map[b.id]=[];
+          map[a.id].push({DISC:b.DISC||b.CODISC||'?',CURSO:b.CURSO||'?',
+            CODISC:b.CODISC||'',CODTUR:String(b.CODTUR||'').trim().toUpperCase(),
+            PROF:b.PROF||'',dia:dia,hCur:a[dia],hOut:b[dia],mins:mins,LOCAL:b.LOCAL||''});
+          map[b.id].push({DISC:a.DISC||a.CODISC||'?',CURSO:a.CURSO||'?',
+            CODISC:a.CODISC||'',CODTUR:String(a.CODTUR||'').trim().toUpperCase(),
+            PROF:a.PROF||'',dia:dia,hCur:b[dia],hOut:a[dia],mins:mins,LOCAL:a.LOCAL||''});
+        }
       }
     }
-  }
-  window._copenConflictMap=map;return map;
+  });
+  window._copenConflictMap=map;
+  _censAtualizarContadorConflitos(map);
+  return map;
+}
+
+// Conflitos de UMA linha (usado ao editar LOCAL ou horario)
+function _detectarConflitoLocal(id, local){
+  const alvo=(_copenEnsData||{})[id];
+  if(!alvo) return [];
+  const k=_localKey(local!==undefined?local:alvo.LOCAL);
+  if(!k) return [];
+  const hA={};
+  _DIAS_ENS.forEach(function(d){ hA[d]=_parseHorarios(alvo[d]); });
+  const out=[];
+  Object.values(_copenEnsData||{}).forEach(function(b){
+    if(!b||b._deleted||b.id===id) return;
+    if(_localKey(b.LOCAL)!==k) return;
+    if(_mesmaAula(alvo,b)) return;
+    if(alvo._conflictIgnored&&b._conflictIgnored) return;
+    _DIAS_ENS.forEach(function(dia){
+      const hB=_parseHorarios(b[dia]);
+      if(!hA[dia].length||!hB.length) return;
+      if(!_horariosConflitam(hA[dia],hB)) return;
+      out.push({DISC:b.DISC||b.CODISC||'?',CURSO:b.CURSO||'?',
+        CODISC:b.CODISC||'',CODTUR:String(b.CODTUR||'').trim().toUpperCase(),
+        PROF:b.PROF||'',dia:dia,hCur:alvo[dia],hOut:b[dia],
+        mins:_minutosSobrepostos(hA[dia],hB),LOCAL:b.LOCAL||''});
+    });
+  });
+  return out;
+}
+
+// Contador de conflitos ao lado do total de registros
+function _censAtualizarContadorConflitos(map){
+  try{
+    const el=document.getElementById('cens-count');
+    if(!el) return;
+    const base=(el.textContent||'').split('·')[0].trim();
+    const n=Object.keys(map||{}).length;
+    el.innerHTML = n
+      ? base+' <span style="color:#b45309;font-weight:800" title="Linhas com conflito de sala. Clique no ⚠️ da coluna LOCAL para ver os detalhes.">· \u26a0\ufe0f '+n+' em conflito</span>'
+      : base+' <span style="color:#1a936f;font-weight:700">· sem conflitos de sala</span>';
+  }catch(ex){}
 }
 function _applyConflictVisuals(){
   const map=window._copenConflictMap||{};
@@ -7062,7 +7195,10 @@ function _showConflictBalloon(anchorEl, cs, recordId) {
     rows += '<div style="padding:.3rem 0;border-bottom:1px dashed #fde68a">';
     rows += '<b>' + esc(c.DISC) + '</b> &mdash; ' + esc(c.CURSO);
     if (c.CODTUR) rows += ' <span style="font-size:.72rem">(Turma ' + esc(c.CODTUR) + ')</span>';
+    if (c.CODISC) rows += ' <span style="font-size:.7rem;color:#a16207">[' + esc(c.CODISC) + ']</span>';
     rows += '<br>\ud83d\udcc5 ' + (_DIA_LABEL[c.dia] || c.dia) + ': <em>' + esc(c.hCur) + '</em> \u00d7 <em>' + esc(c.hOut) + '</em>';
+    if (c.mins) rows += ' <b style="color:#b45309">(' + c.mins + ' min sobrepostos)</b>';
+    if (c.PROF) rows += '<br><span style="font-size:.72rem">\ud83d\udc64 ' + esc(c.PROF) + '</span>';
     rows += '</div>';
   }
 
@@ -7188,10 +7324,14 @@ function copenEnsalarCellChange(inp) {
   if (field === 'REF') {
     _copenEnsData[id]._localOk = true;
   }
-  // ── Recheck conflito quando horário muda ──────────────────────
-  if (_DIAS_ENS.includes(field) && _copenEnsData[id].LOCAL) {
+  // ── Recheck conflito quando horário OU local muda ─────────────
+  // Reconstroi o mapa inteiro: a alteracao de uma linha pode criar ou
+  // desfazer conflito em OUTRAS linhas da mesma sala.
+  if (_DIAS_ENS.includes(field) || field === 'LOCAL') {
     clearTimeout(_copenEnsData[id]._conflictTimer);
     _copenEnsData[id]._conflictTimer = setTimeout(function() {
+      _buildConflictMap();
+      if (typeof _applyConflictVisuals === 'function') _applyConflictVisuals();
       const _conflicts2 = _detectarConflitoLocal(id, _copenEnsData[id].LOCAL);
       const _localInp = document.querySelector(
         '#cens-tbody input[data-id="'+id+'"][data-field="LOCAL"]');
