@@ -4197,6 +4197,9 @@ async function gerarHTMLEnsalamentoGeral(){
       + '<meta charset="UTF-8">\n'
       + '<meta name="viewport" content="width=device-width, initial-scale=1.0">\n'
       + '<meta name="color-scheme" content="dark">\n'
+      + '<meta name="pen-artefato" content="ensalamento-geral">\n'
+      + '<meta name="pen-semestre" content="' + esc2(semestre) + '">\n'
+      + '<meta name="pen-versao" content="' + esc2(ver) + '">\n'
       + '<title>Ensalamento FT ' + esc2(semestre) + '</title>\n'
       + '<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"/>\n'
       + '<style>' + _ENS_TPL_CSS + '</style>\n</head>\n<body>\n'
@@ -4267,13 +4270,18 @@ async function gerarHTMLEnsalamentoGeral(){
       + _ENS_TPL_JS + '\n' + contador
       + '\n<\/script>\n</body>\n</html>';
 
+    // Nome descritivo e único: evita o "index (1)", "index (24)" na pasta de
+    // downloads, que já levou o arquivo errado a ser publicado.
+    var nomeArq = 'ensalamento-geral-' + String(semestre).replace('/','-')
+                + '-' + String(ver).toLowerCase() + '.html';
     var url = URL.createObjectURL(new Blob([html], {type:'text/html;charset=utf-8'}));
     var a = document.createElement('a');
-    a.href = url; a.download = 'index.html';
+    a.href = url; a.download = nomeArq;
     document.body.appendChild(a); a.click();
-    setTimeout(function(){ try{ a.remove(); URL.revokeObjectURL(url); }catch(e){} }, 2000);
+    setTimeout(function(){ try{ a.remove(); }catch(e){} }, 1500);
+    _ocupCaixaPublicar(nomeArq, 'Ensalamento Geral · ' + semestre + ' · ' + ver, url);
 
-    toast('Ensalamento geral gerado: index.html · ' + semestre + ' - ' + ver
+    toast('Ensalamento geral gerado: ' + nomeArq + ' · ' + semestre + ' - ' + ver
       + ' · ' + dados.length + ' turma(s) em ' + _ensUnicos(dados,'LOCAL').length + ' local(is)'
       + (linkOcup ? ' · Ocupação dos Espaços aponta para o link informado'
                   : ' · Ocupação dos Locais usará o painel interno'), 'ok');
@@ -4780,6 +4788,60 @@ function _ocupCaixaLink(semestre, atual){
   });
 }
 
+// Caixa exibida após gerar a página: confirma qual arquivo foi baixado e
+// ensina a publicar. Nasceu de um tropeço real — havia vários "index (1)",
+// "index (24)" na pasta de downloads e o arquivo errado subiu para o GitHub.
+function _ocupCaixaPublicar(nomeArq, titulo, blobUrl){
+  var fundo = document.createElement('div');
+  fundo.style.cssText = 'position:fixed;inset:0;z-index:99999;background:rgba(8,20,28,.55);'
+    + 'display:flex;align-items:center;justify-content:center;padding:1rem';
+  fundo.innerHTML =
+    '<div style="background:#fff;border-radius:14px;max-width:560px;width:100%;'
+    + 'max-height:92vh;overflow:auto;box-shadow:0 18px 50px rgba(0,0,0,.3)">'
+    + '<div style="background:linear-gradient(135deg,#0b4f6c,#1a936f);color:#fff;padding:.9rem 1.1rem">'
+    +   '<div style="font-weight:800;font-size:.98rem">\u2705 Página gerada</div>'
+    +   '<div style="font-size:.76rem;opacity:.92">' + esc(titulo) + '</div></div>'
+    + '<div style="padding:1.1rem;font-size:.86rem;line-height:1.6;color:#233">'
+    +   '<div style="background:#f0f7f4;border:1px solid #cfe6dd;border-radius:10px;'
+    +   'padding:.7rem .9rem;margin-bottom:.9rem">'
+    +     '<div style="font-size:.72rem;text-transform:uppercase;letter-spacing:.6px;'
+    +     'color:#557;font-weight:800">Arquivo baixado</div>'
+    +     '<div style="font-family:monospace;font-size:.9rem;font-weight:700;color:#0b4f6c;'
+    +     'word-break:break-all;margin-top:.2rem">' + esc(nomeArq) + '</div></div>'
+    +   '<b>Para publicar no GitHub Pages:</b>'
+    +   '<ol style="margin:.5rem 0 .9rem 1.15rem;padding:0">'
+    +     '<li>Localize <b>' + esc(nomeArq) + '</b> na pasta de downloads — confira o nome, '
+    +       'para não subir um arquivo antigo por engano.</li>'
+    +     '<li>Renomeie para <b>index.html</b> (o GitHub Pages abre esse nome na raiz da pasta).</li>'
+    +     '<li>Envie ao repositório da publicação. Se já existir um index.html lá, '
+    +       '<b>substitua</b>: confirme em “Commit changes” que o arquivo antigo foi trocado.</li>'
+    +     '<li>Aguarde de 1 a 2 minutos e recarregue com <b>Ctrl+F5</b> para ignorar o cache.</li>'
+    +   '</ol>'
+    +   '<div style="background:#fff7ed;border:1px solid #fed7aa;border-radius:10px;'
+    +   'padding:.7rem .9rem;font-size:.82rem">'
+    +     '<b>Se aparecer a tela de login da PEN</b>, o index.html publicado ainda é o da '
+    +     'plataforma. Suba novamente o arquivo acima por cima dele — o arquivo certo abre '
+    +     'direto na página pública, sem pedir e-mail e senha.</div>'
+    +   '<div style="display:flex;gap:.5rem;justify-content:flex-end;margin-top:1rem;flex-wrap:wrap">'
+    +     '<button id="ocup-pub-idx" style="padding:.5rem .95rem;border:1.5px solid #0b4f6c;'
+    +     'background:#fff;color:#0b4f6c;border-radius:9px;font-weight:700;font-size:.82rem;'
+    +     'cursor:pointer">Baixar também como index.html</button>'
+    +     '<button id="ocup-pub-ok" style="padding:.5rem 1.1rem;border:none;color:#fff;'
+    +     'background:#0b4f6c;border-radius:9px;font-weight:700;font-size:.82rem;'
+    +     'cursor:pointer">Entendi</button>'
+    +   '</div></div></div>';
+  document.body.appendChild(fundo);
+  var fim = function(){ try{ fundo.remove(); }catch(e){} };
+  fundo.querySelector('#ocup-pub-ok').onclick = fim;
+  fundo.querySelector('#ocup-pub-idx').onclick = function(){
+    var a = document.createElement('a');
+    a.href = blobUrl; a.download = 'index.html';
+    document.body.appendChild(a); a.click();
+    setTimeout(function(){ try{ a.remove(); }catch(e){} }, 800);
+  };
+  fundo.addEventListener('click', function(e){ if(e.target===fundo) fim(); });
+}
+
 // Chave do painel no contador de acessos (um contador por semestre/versão)
 function _ocupPainelId(semestre, versao){
   var c = _relOcupCarimbo();
@@ -4878,13 +4940,16 @@ async function relOcupacaoHTMLFile(){
       + _OCUP_TPL_JS.replace('Espaços Cadastrados','Espaços Ensalados')
       + _OCUP_TPL_JS_EXTRA + '\n<\/script>\n</body>\n</html>';
 
+    var nomeArq = 'ocupacao-espacos-' + String(_semAtual).replace('/','-')
+                + '-' + String(ver).toLowerCase() + '.html';
     var url = URL.createObjectURL(new Blob([html], {type:'text/html;charset=utf-8'}));
     var a = document.createElement('a');
-    a.href = url; a.download = 'index.html';
+    a.href = url; a.download = nomeArq;
     document.body.appendChild(a); a.click();
-    setTimeout(function(){ try{ a.remove(); URL.revokeObjectURL(url); }catch(e){} }, 2000);
+    setTimeout(function(){ try{ a.remove(); }catch(e){} }, 1500);
+    _ocupCaixaPublicar(nomeArq, 'Ocupação dos Espaços · ' + _semAtual + ' · ' + ver, url);
     var _locais = _ocupEspacos(todas).length;
-    toast('Painel gerado: index.html · ' + _semAtual + (ver ? ' - ' + ver : '')
+    toast('Painel gerado: ' + nomeArq + ' · ' + _semAtual + (ver ? ' - ' + ver : '')
       + ' · ' + todas.length + ' registro(s) em ' + _locais + ' local(is)'
       + (_escolha.origem === 'historico' && !_escolha.registros
          ? ' · fonte: histórico homologado' : ''), 'ok');
