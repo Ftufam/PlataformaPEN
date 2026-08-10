@@ -734,6 +734,9 @@ tbody tr:hover td{background:#f4f9f6}
 <div style="display:flex;align-items:center;gap:.6rem;flex-wrap:wrap;margin-bottom:.85rem">
 <button class="btn be" onclick="exportEnsalarExcel('copen')">📊 Baixar planilha</button>
 <button class="btn bv" onclick="window.open('https://view.genially.com/663bc7a91fee170014c03626','_blank')" title="Acessar BMEU" style="display:inline-flex">📘 BMEU</button>
+<button class="btn" onclick="copenManutencao()"
+  title="Recuperar locais, ver conflitos e desfazer alterações"
+  style="background:#dcfce7;color:#14532d;border:1.5px solid #86efac;font-weight:700;font-size:.79rem">🛟 Recuperação</button>
 <button class="btn" onclick="gerarHTMLEnsalamentoGeral()" title="Gerar a página pública do ensalamento geral para download"
   style="background:#ede9fe;color:#5b21b6;border:1.5px solid #c4b5fd;font-weight:700;font-size:.79rem">🌐 CRIAR HTML DO ENSALAMENTO GERAL</button>
 <button class="btn be" id="cens-btn-add" onclick="copenEnsalarAddRow()" style="display:none">➕ NOVA DISCIPLINA</button>
@@ -4136,9 +4139,10 @@ async function gerarHTMLEnsalamentoGeral(){
     var escolha = await _ocupEscolherSemestre(opcoes);
     if(!escolha) return;
 
-    // Segunda pergunta: o endereço público do painel de Ocupação dos Espaços
-    var linkOcup = await _ocupLinkPainel(escolha.anosem);
-    if(linkOcup === null) return;               // cancelado
+    // Sem segunda pergunta: usa o link do painel de ocupação já cadastrado
+    // para este semestre, se houver. Não havendo, o cartão da página pública
+    // abre o painel interno de ocupação.
+    var linkOcup = await _ocupLinkPainelSalvo(escolha.anosem);
 
     var registros = await _ocupRegistrosDoSemestre(escolha);
     if(!registros.length){ toast('Nenhum registro em ' + escolha.anosem + '.','err'); return; }
@@ -4723,6 +4727,17 @@ function _ocupEscolherSemestre(opcoes){
 // Link publicado do painel "Ocupação dos Espaços", guardado por semestre.
 // A COPEN-FT informa o endereço uma vez por ciclo; o valor fica salvo e
 // volta preenchido nas próximas gerações.
+// Recupera o link já salvo, sem perguntar nada ao usuário.
+async function _ocupLinkPainelSalvo(semestre){
+  var chave = 'config/link_ocupacao';
+  var cfg = (typeof LS==='function' ? LS(chave) : null) || {};
+  try{
+    var remoto = await dbGet(chave);
+    if(remoto && typeof remoto==='object') cfg = Object.assign({}, cfg, remoto);
+  }catch(e){}
+  var k = String(semestre||'').replace('/','-');
+  return String(cfg[k] || cfg.padrao || '').trim();
+}
 async function _ocupLinkPainel(semestre){
   var chave = 'config/link_ocupacao';
   var cfg = (typeof LS==='function' ? LS(chave) : null) || {};
@@ -7354,6 +7369,7 @@ let _ensSyncRef      = null;
 let _ensSyncPoll     = null;
 let _ensSyncCopenRef  = null;   // listener Firebase overlay COPEN-FT
 let _ensSyncCopenRef2 = null;   // listener Firebase overlay COPEN-FT (path alternativo)
+let _ensSyncCopenExtra = [];    // listeners do nó ensalar_copen (2º path de gravação)
 let _ensSyncCopenPoll = null;   // polling REST overlay COPEN-FT
 function ensalarStartSync() {
   const myIds  = currentUser.ids || [currentUser.id];
@@ -7481,6 +7497,8 @@ function ensalarStartSync() {
   _ensSyncCopenRef = null;
   try { if (_ensSyncCopenRef2) _ensSyncCopenRef2.off(); } catch(e) {}
   _ensSyncCopenRef2 = null;
+  try { (_ensSyncCopenExtra || []).forEach(function(r){ try{ r.off(); }catch(e){} }); } catch(e) {}
+  _ensSyncCopenExtra = [];
   if (_ensSyncPoll) { clearInterval(_ensSyncPoll); _ensSyncPoll = null; }
   if (_ensSyncCopenPoll) { clearInterval(_ensSyncCopenPoll); _ensSyncCopenPoll = null; }
 
@@ -7502,6 +7520,20 @@ function ensalarStartSync() {
         // Armazena para poder desligar depois
         _ensSyncCopenRef2 = _refB;
       }
+      // A COPEN-FT grava em DOIS nós a cada salvamento: ensalar_copen_full
+      // e ensalar_copen. Sem ouvir o segundo, edições da COPEN só chegavam
+      // ao gestor quando ele recarregava a aba.
+      try{
+        _ensSyncCopenExtra = [];
+        [ 'ensalar_copen/' + anosem.replace('/','-'),
+          (refAno && refSem) ? ('ensalar_copen/' + refAno + '-' + refSem) : null
+        ].forEach(function(pp){
+          if (!pp || pp === copenPath || pp === _copenPathB) return;
+          var rr = db.ref(pp);
+          rr.on('value', function(snap){ mergeCopen(snap.val()); });
+          _ensSyncCopenExtra.push(rr);
+        });
+      }catch(e){}
       return;
     } catch(e) { console.warn('Listener indisponível, usando polling REST:', e); }
   }
@@ -8170,8 +8202,12 @@ async function outrosCarregar() {
     const ce = await dbGet('ensalar_copen/' + novoAno + '-' + novoSem);
     if (ce && typeof ce === 'object') {
       Object.entries(ce).forEach(([id, r]) => {
-        const _stBase2 = r._status || (outrosFullData[id] && outrosFullData[id]._status) || 'original';
-        outrosFullData[id] = normalizeEnsCmt({ ...(outrosFullData[id] || {}), ...r, id, _status: _stBase2 });
+        const atual = outrosFullData[id];
+        const tAtual = (atual && atual.updatedAt) || 0;
+        const tNovo  = (r && r.updatedAt) || 0;
+        if (atual && tAtual > tNovo) return;     // não deixa o legado regredir
+        const _stBase2 = r._status || (atual && atual._status) || 'original';
+        outrosFullData[id] = normalizeEnsCmt({ ...(atual || {}), ...r, id, _status: _stBase2 });
       });
     }
   } catch(e) {}
@@ -8551,8 +8587,12 @@ async function copenEnsalarLoad() {
       Object.entries(full).forEach(([id, r]) => {
         // Na tabela da COPEN: o _status do overlay (edited/new/original) é o estado real.
         // O _status do seed pode ser 'original', mas se a COPEN editou, vem 'edited' do overlay.
-        const _stBase = r._status || (_copenEnsData[id] && _copenEnsData[id]._status) || 'original';
-        _copenEnsData[id] = normalizeEnsCmt({ ...(_copenEnsData[id] || {}), ...r, id, _status: _stBase });
+        const atual = _copenEnsData[id];
+        const tAtual = (atual && atual.updatedAt) || 0;
+        const tNovo  = (r && r.updatedAt) || 0;
+        if (atual && atual._copenOverride && tAtual > tNovo) return;
+        const _stBase = r._status || (atual && atual._status) || 'original';
+        _copenEnsData[id] = normalizeEnsCmt({ ...(atual || {}), ...r, id, _status: _stBase });
       });
     }
   } catch(e) {}
@@ -8560,8 +8600,15 @@ async function copenEnsalarLoad() {
     const ce = await dbGet('ensalar_copen/' + novoAno + '-' + novoSem);
     if (ce && typeof ce === 'object') {
       Object.entries(ce).forEach(([id, r]) => {
-        const _stBase2 = r._status || (_copenEnsData[id] && _copenEnsData[id]._status) || 'original';
-        _copenEnsData[id] = normalizeEnsCmt({ ...(_copenEnsData[id] || {}), ...r, id, _status: _stBase2 });
+        // GUARDA DE DATA — o nó legado só entra se for MAIS RECENTE.
+        // Sem isto, uma cópia antiga aqui apagava na tela a correção
+        // gravada em ensalar_copen_full, fazendo o valor velho "voltar".
+        const atual = _copenEnsData[id];
+        const tAtual = (atual && atual.updatedAt) || 0;
+        const tNovo  = (r && r.updatedAt) || 0;
+        if (atual && tAtual > tNovo) return;
+        const _stBase2 = r._status || (atual && atual._status) || 'original';
+        _copenEnsData[id] = normalizeEnsCmt({ ...(atual || {}), ...r, id, _status: _stBase2 });
       });
     }
   } catch(e) {}
@@ -8591,10 +8638,778 @@ function copenEnsPopulateCursos() {
 }
 
 // ── Filter + sort ────────────────────────────────────────────────
+// Registro tocado pela COPEN-FT: marcado no salvamento consolidado
+function _ehAtualizadoCopen(r){
+  return !!(r && (r._copenOverride || r._status === 'new'
+    || (r.updatedBy && String(r.updatedBy).toLowerCase().indexOf('copen') >= 0)));
+}
+let _censSoCopen = false;
+function copenEnsalarToggleCopen(){
+  _censSoCopen = !_censSoCopen;
+  const bt = document.getElementById('cens-btn-copen');
+  if (bt){
+    bt.style.background = _censSoCopen ? '#0b4f6c' : '#e0f2fe';
+    bt.style.color      = _censSoCopen ? '#fff'    : '#0369a1';
+    bt.textContent = _censSoCopen
+      ? '🔵 Mostrando só os atualizados pela COPEN-FT'
+      : '🔵 Só atualizados pela COPEN-FT';
+  }
+  copenEnsalarFilter();
+}
+
+
+// ═══════════════════════════════════════════════════════════════
+// DIAGNÓSTICO E REPARO DO ENSALAMENTO
+// A sincronização automática do Perfil dos Espaços (versões anteriores)
+// gravava no Firebase uma cópia da linha em memória. Quando essa cópia
+// estava desatualizada, ela sobrescrevia o dado bom e ressuscitava
+// valores antigos. Esta ferramenta encontra e conserta esses casos.
+// ═══════════════════════════════════════════════════════════════
+function _repChave(r){
+  return [String(r.CURSO||'').trim().toUpperCase(),
+          String(r.CODISC||'').trim().toUpperCase(),
+          String(r.CODTUR||'').trim().toUpperCase(),
+          String(r.PER==null?'':r.PER).trim()].join('|');
+}
+function _repSuspeitos(){
+  var linhas = Object.values(_copenEnsData || {}).filter(function(r){ return r && !r._deleted; });
+  var porChave = {};
+  linhas.forEach(function(r){ (porChave[_repChave(r)] = porChave[_repChave(r)] || []).push(r); });
+  var out = [];
+  linhas.forEach(function(r){
+    var motivos = [];
+    if (r._lastField === 'LOCAL_ESPACOS') motivos.push('gravado pela sincronização de espaços');
+    var grupo = porChave[_repChave(r)] || [];
+    if (grupo.length > 1) motivos.push('duplicado (' + grupo.length + ' linhas iguais)');
+    if (motivos.length) out.push({ r: r, motivos: motivos });
+  });
+  return out.sort(function(a,b){
+    return String(a.r.CURSO).localeCompare(String(b.r.CURSO),'pt-BR')
+        || String(a.r.DISC).localeCompare(String(b.r.DISC),'pt-BR'); });
+}
+// Procura a versão salva pelo próprio gestor da unidade
+async function _repVersaoGestor(r){
+  var pr = LS('config/prazos') || prazosData || {};
+  var chaves = [];
+  if (pr.ano && pr.sem)       chaves.push(pr.ano + '-' + pr.sem);
+  if (pr.refAno && pr.refSem) chaves.push(pr.refAno + '-' + pr.refSem);
+  var sig = String(r.CURSO || '').trim();
+  for (var i = 0; i < chaves.length; i++){
+    try{
+      var v = await dbGet('ensalar/' + sig + '/' + chaves[i] + '/' + r.id);
+      if (v && typeof v === 'object') return v;
+    }catch(e){}
+  }
+  return null;
+}
+
+async function copenDiagnosticoReparo(){
+  var lista = _repSuspeitos();
+  var fundo = document.createElement('div');
+  fundo.style.cssText = 'position:fixed;inset:0;z-index:99999;background:rgba(8,20,28,.6);'
+    + 'display:flex;align-items:center;justify-content:center;padding:1rem';
+  var linhasHTML = lista.length
+    ? lista.map(function(x, i){
+        var r = x.r;
+        return '<label style="display:flex;gap:.6rem;align-items:flex-start;padding:.55rem .2rem;'
+          + 'border-bottom:1px solid #eef3f1;cursor:pointer">'
+          + '<input type="checkbox" class="rep-ck" data-id="' + esc(r.id) + '" '
+          + 'style="margin:.25rem 0 0;width:16px;min-width:16px;max-width:16px;height:16px;'
+          + 'flex:0 0 16px;padding:0;border:1px solid #9ab;accent-color:#0b4f6c">'
+          + '<span style="flex:1;min-width:0">'
+          +   '<b>' + esc(r.CODISC || '?') + '</b> · ' + esc(r.DISC || '') 
+          +   ' <span style="color:#667">(' + esc(r.CURSO || '') + ' · turma ' + esc(r.CODTUR || '') + ')</span>'
+          +   '<br><span style="font-size:.76rem;color:#667">' + esc(r.ANOSEM || '') 
+          +   ' · local: ' + esc(r.LOCAL || '—') + ' · ' + esc(x.motivos.join(' · ')) + '</span>'
+          + '</span></label>';
+      }).join('')
+    : '<div style="padding:1.4rem;text-align:center;color:#557">'
+      + 'Nenhum registro suspeito encontrado nesta tabela.</div>';
+
+  fundo.innerHTML =
+    '<div style="background:#fff;border-radius:14px;max-width:720px;width:100%;max-height:92vh;'
+    + 'display:flex;flex-direction:column;box-shadow:0 18px 50px rgba(0,0,0,.3);overflow:hidden">'
+    + '<div style="background:linear-gradient(135deg,#0b4f6c,#1a936f);color:#fff;padding:.9rem 1.1rem">'
+    +   '<div style="font-weight:800;font-size:.98rem">🩺 Diagnóstico do ensalamento</div>'
+    +   '<div style="font-size:.76rem;opacity:.92">' + lista.length
+    +   ' registro(s) suspeito(s) de ' + Object.values(_copenEnsData||{}).filter(function(r){return r&&!r._deleted;}).length
+    +   ' na tabela</div></div>'
+    + '<div style="padding:.9rem 1.1rem;font-size:.84rem;color:#233;line-height:1.55;'
+    + 'border-bottom:1px solid #eef3f1">'
+    +   'Marque os registros e escolha a ação. <b>Restaurar</b> busca a versão salva pelo '
+    +   'coordenador ou chefe da unidade e devolve o conteúdo dela. <b>Excluir</b> remove '
+    +   'a linha do ensalamento consolidado.</div>'
+    + '<div id="rep-lista" style="flex:1;overflow:auto;padding:.4rem 1.1rem;font-size:.86rem;'
+    + 'line-height:1.5;color:#233">'
+    +   linhasHTML + '</div>'
+    + '<div style="padding:.9rem 1.1rem;border-top:1px solid #eef3f1;display:flex;gap:.5rem;'
+    + 'flex-wrap:wrap;justify-content:space-between;align-items:center">'
+    +   '<div><button id="rep-todos" style="padding:.45rem .8rem;border:1.5px solid #dce8e3;'
+    +   'background:#fff;border-radius:8px;font-weight:700;font-size:.8rem;cursor:pointer">'
+    +   'Marcar todos</button></div>'
+    +   '<div style="display:flex;gap:.5rem;flex-wrap:wrap">'
+    +     '<button id="rep-fechar" style="padding:.5rem .95rem;border:1.5px solid #dce8e3;'
+    +     'background:#fff;border-radius:9px;font-weight:700;font-size:.82rem;cursor:pointer">Fechar</button>'
+    +     '<button id="rep-restaurar" style="padding:.5rem 1rem;border:none;color:#fff;'
+    +     'background:#1a936f;border-radius:9px;font-weight:700;font-size:.82rem;cursor:pointer">'
+    +     '↩️ Restaurar do gestor</button>'
+    +     '<button id="rep-excluir" style="padding:.5rem 1rem;border:none;color:#fff;'
+    +     'background:#c0392b;border-radius:9px;font-weight:700;font-size:.82rem;cursor:pointer">'
+    +     '🗑️ Excluir selecionados</button>'
+    +   '</div></div></div>';
+  document.body.appendChild(fundo);
+  var fim = function(){ try{ fundo.remove(); }catch(e){} };
+  fundo.querySelector('#rep-fechar').onclick = fim;
+  fundo.addEventListener('click', function(e){ if(e.target === fundo) fim(); });
+  fundo.querySelector('#rep-todos').onclick = function(){
+    var cks = fundo.querySelectorAll('.rep-ck');
+    var marcar = ![].every.call(cks, function(c){ return c.checked; });
+    [].forEach.call(cks, function(c){ c.checked = marcar; });
+  };
+  var selecionados = function(){
+    return [].filter.call(fundo.querySelectorAll('.rep-ck'), function(c){ return c.checked; })
+             .map(function(c){ return c.dataset.id; });
+  };
+
+  fundo.querySelector('#rep-restaurar').onclick = async function(){
+    var ids = selecionados();
+    if(!ids.length){ toast('Marque ao menos um registro.','warn'); return; }
+    var ok = 0, sem = 0;
+    for (var i = 0; i < ids.length; i++){
+      var r = _copenEnsData[ids[i]];
+      if(!r) continue;
+      var v = await _repVersaoGestor(r);
+      if(!v){ sem++; continue; }
+      _copenEnsData[ids[i]] = normalizeEnsCmt(Object.assign({}, r, v, { id: ids[i] }));
+      delete _copenEnsData[ids[i]]._lastField;
+      try{ await copenEnsalarSave(ids[i], 'REPARO'); }catch(e){}
+      ok++;
+    }
+    fim(); copenEnsalarFilter();
+    toast(ok + ' registro(s) restaurado(s) da versão do gestor'
+      + (sem ? ' · ' + sem + ' sem cópia do gestor disponível' : ''), ok ? 'ok' : 'warn');
+  };
+
+  fundo.querySelector('#rep-excluir').onclick = async function(){
+    var ids = selecionados();
+    if(!ids.length){ toast('Marque ao menos um registro.','warn'); return; }
+    if(!confirm('Excluir ' + ids.length + ' registro(s) do ensalamento consolidado?')) return;
+    for (var i = 0; i < ids.length; i++){
+      var alvo = _copenEnsData[ids[i]];
+      if(!alvo) continue;
+      alvo._deleted = true;
+      alvo.updatedAt = Date.now();
+      try{ await copenEnsalarSave(ids[i], 'REPARO_EXCLUSAO'); }catch(e){}
+    }
+    fim(); copenEnsalarFilter();
+    toast(ids.length + ' registro(s) excluído(s).', 'ok');
+  };
+}
+
+
+// ═══════════════════════════════════════════════════════════════
+// INSPEÇÃO DE DADOS — somente leitura
+// Não altera nada. Lê todos os nós do ensalamento, baixa um backup
+// completo em JSON e mostra onde cada versão de cada registro está,
+// com data e hora. Serve para descobrir se uma correção perdida ainda
+// existe em algum nó antes de tentar qualquer recuperação.
+// ═══════════════════════════════════════════════════════════════
+async function copenInspecionarDados(silencioso){
+  var st = document.getElementById('cens-save-status');
+  if (st) st.textContent = '🧪 Lendo todos os nós do ensalamento…';
+
+  var pr = LS('config/prazos') || prazosData || {};
+  var ref  = (pr.refAno || '') + '-' + (pr.refSem || '');
+  var novo = (pr.ano || '') + '-' + (pr.sem || '');
+  var nos = {};
+  var caminhos = ['ensalar_copen_full/' + ref, 'ensalar_copen/' + novo,
+                  'ensalar_copen_full/' + novo, 'ensalar_copen/' + ref];
+  for (var i = 0; i < caminhos.length; i++){
+    try{ var v = await dbGet(caminhos[i]); if (v && typeof v === 'object') nos[caminhos[i]] = v; }
+    catch(e){}
+  }
+  // nós dos gestores (cópias independentes)
+  var siglas = {};
+  try{ Object.values(gestoresData || {}).forEach(function(g){
+    if (g && g.sigla) siglas[String(g.sigla).trim()] = 1; }); }catch(e){}
+  var chavesG = [novo, ref];
+  for (var sg in siglas){
+    for (var k = 0; k < chavesG.length; k++){
+      try{
+        var vg = await dbGet('ensalar/' + sg + '/' + chavesG[k]);
+        if (vg && typeof vg === 'object' && Object.keys(vg).length)
+          nos['ensalar/' + sg + '/' + chavesG[k]] = vg;
+      }catch(e){}
+    }
+  }
+
+  // ── backup completo ───────────────────────────────────────────
+  var backup = { gerado: new Date().toISOString(), semestreRef: ref, semestreNovo: novo, nos: nos };
+  var nomeBk = 'backup-ensalamento-' + novo + '-'
+             + new Date().toISOString().slice(0,16).replace(/[:T]/g,'') + '.json';
+  var urlBk = URL.createObjectURL(new Blob([JSON.stringify(backup, null, 1)],
+                {type:'application/json;charset=utf-8'}));
+  var ab = document.createElement('a');
+  ab.href = urlBk; ab.download = nomeBk;
+  document.body.appendChild(ab); ab.click();
+  setTimeout(function(){ try{ ab.remove(); }catch(e){} }, 1200);
+
+  // ── comparação entre o nó principal e o legado ────────────────
+  var A = nos['ensalar_copen_full/' + ref] || {};
+  var B = nos['ensalar_copen/' + novo] || {};
+  var soA = [], soB = [], divergentes = [];
+  Object.keys(A).forEach(function(id){
+    if (!B[id]) { soA.push(id); return; }
+    var a = A[id], b = B[id];
+    if (String(a.LOCAL||'') !== String(b.LOCAL||'') || String(a.ANOSEM||'') !== String(b.ANOSEM||'')){
+      divergentes.push({ id:id,
+        principal:{ local:a.LOCAL||'—', anosem:a.ANOSEM||'—', em:a.updatedAt||0 },
+        legado:   { local:b.LOCAL||'—', anosem:b.ANOSEM||'—', em:b.updatedAt||0 },
+        disc: a.DISC || b.DISC || id, cur: a.CURSO || b.CURSO || '' });
+    }
+  });
+  Object.keys(B).forEach(function(id){ if (!A[id]) soB.push(id); });
+
+  var dt = function(t){ return t ? new Date(t).toLocaleString('pt-BR') : 'sem data'; };
+  var linhas = divergentes.slice(0, 40).map(function(d){
+    return '<div style="padding:.5rem 0;border-bottom:1px dashed #e2ece8">'
+      + '<b>' + esc(d.disc) + '</b> <span style="color:#667">(' + esc(d.cur) + ')</span><br>'
+      + '<span style="color:#0b4f6c">principal:</span> ' + esc(d.principal.local)
+      + ' · ' + esc(d.principal.anosem) + ' · ' + dt(d.principal.em) + '<br>'
+      + '<span style="color:#b45309">legado:</span> ' + esc(d.legado.local)
+      + ' · ' + esc(d.legado.anosem) + ' · ' + dt(d.legado.em)
+      + '</div>';
+  }).join('');
+
+  var resumo = Object.keys(nos).map(function(k){
+    return '<div style="display:flex;justify-content:space-between;gap:1rem;padding:.22rem 0">'
+      + '<span style="font-family:monospace;font-size:.8rem">' + esc(k) + '</span>'
+      + '<b>' + Object.keys(nos[k]).length + '</b></div>';
+  }).join('');
+
+  if (silencioso){
+    if (st) st.textContent = '💾 Backup salvo: ' + nomeBk;
+    return;
+  }
+  var fundo = document.createElement('div');
+  fundo.style.cssText = 'position:fixed;inset:0;z-index:99999;background:rgba(8,20,28,.6);'
+    + 'display:flex;align-items:center;justify-content:center;padding:1rem';
+  fundo.innerHTML =
+    '<div style="background:#fff;border-radius:14px;max-width:760px;width:100%;max-height:92vh;'
+    + 'display:flex;flex-direction:column;box-shadow:0 18px 50px rgba(0,0,0,.3);overflow:hidden">'
+    + '<div style="background:linear-gradient(135deg,#0b4f6c,#1a936f);color:#fff;padding:.9rem 1.1rem">'
+    +   '<div style="font-weight:800;font-size:.98rem">🧪 Inspeção de dados (somente leitura)</div>'
+    +   '<div style="font-size:.76rem;opacity:.92">Backup salvo: ' + esc(nomeBk) + '</div></div>'
+    + '<div style="flex:1;overflow:auto;padding:1rem 1.1rem;font-size:.86rem;color:#233;line-height:1.55">'
+    +   '<b>Registros por nó no Firebase</b>'
+    +   '<div style="margin:.4rem 0 1rem">' + resumo + '</div>'
+    +   '<b>Comparação principal × legado</b>'
+    +   '<div style="margin:.35rem 0 .8rem">'
+    +     'Apenas no principal: <b>' + soA.length + '</b> · '
+    +     'Apenas no legado: <b>' + soB.length + '</b> · '
+    +     'Com LOCAL ou semestre divergente: <b>' + divergentes.length + '</b></div>'
+    +   (linhas ? ('<div style="border-top:1px solid #eef3f1">' + linhas + '</div>'
+                   + (divergentes.length > 40
+                      ? '<div style="padding:.5rem 0;color:#667">… e mais '
+                        + (divergentes.length - 40) + ' caso(s) no arquivo de backup.</div>' : ''))
+              : '<div style="color:#667">Nenhuma divergência entre os dois nós.</div>')
+    + '</div>'
+    + '<div style="padding:.9rem 1.1rem;border-top:1px solid #eef3f1;text-align:right">'
+    +   '<button id="insp-fechar" style="padding:.5rem 1.1rem;border:none;color:#fff;'
+    +   'background:#0b4f6c;border-radius:9px;font-weight:700;font-size:.82rem;cursor:pointer">Fechar</button>'
+    + '</div></div>';
+  document.body.appendChild(fundo);
+  var fim = function(){ try{ fundo.remove(); URL.revokeObjectURL(urlBk); }catch(e){} };
+  fundo.querySelector('#insp-fechar').onclick = fim;
+  fundo.addEventListener('click', function(e){ if (e.target === fundo) fim(); });
+
+  if (st) st.textContent = '🧪 Inspeção concluída — backup ' + nomeBk + ' salvo.';
+}
+
+
+// ═══════════════════════════════════════════════════════════════
+// RESTAURAÇÃO DO INCIDENTE DA SINCRONIZAÇÃO DE ESPAÇOS
+// Em 09/08 uma rotina automática gravou no Firebase cópias de linhas
+// que só existiam na planilha de referência, carimbando-as como
+// "editado pela COPEN-FT" (_lastField = LOCAL_ESPACOS) e mantendo o
+// semestre antigo. Elas não contêm nenhuma correção da COPEN-FT —
+// são idênticas à planilha. Removê-las do Firebase devolve a tabela
+// ao estado anterior: essas linhas voltam a ser lidas da planilha.
+// As edições verdadeiras (semestre novo) NÃO são tocadas.
+// ═══════════════════════════════════════════════════════════════
+function _restAlvos(){
+  var pr = LS('config/prazos') || prazosData || {};
+  var refAnosem = (pr.refAno || '') + '/' + (pr.refSem || '');
+  var out = [];
+  Object.keys(_copenEnsData || {}).forEach(function(id){
+    var r = _copenEnsData[id];
+    if (!r) return;
+    if (r._lastField !== 'LOCAL_ESPACOS') return;          // só as da rotina
+    if (String(r.ANOSEM || '').trim() !== refAnosem) return; // nunca promovidas
+    out.push(id);
+  });
+  return out;
+}
+async function copenRestaurarIncidente(){
+  var pr = LS('config/prazos') || prazosData || {};
+  var ref  = (pr.refAno || '') + '-' + (pr.refSem || '');
+  var novo = (pr.ano || '') + '-' + (pr.sem || '');
+  var alvos = _restAlvos();
+  var genuinos = Object.values(_copenEnsData || {}).filter(function(r){
+    return r && !r._deleted && r._copenOverride && r._lastField !== 'LOCAL_ESPACOS'; }).length;
+
+  if (!alvos.length){
+    alert('Nenhuma gravação automática encontrada nesta tabela.\n\n'
+      + 'Edições verdadeiras da COPEN-FT preservadas: ' + genuinos + '.');
+    return;
+  }
+  if (!confirm('Serão removidas ' + alvos.length + ' cópias gravadas automaticamente em 09/08.\n\n'
+      + 'O QUE MUDA: essas linhas deixam de constar como "editadas pela COPEN-FT" e voltam\n'
+      + 'a ser lidas da planilha de referência — as disciplinas continuam aparecendo.\n'
+      + 'O QUE NÃO MUDA: o total de registros tende a permanecer o mesmo, e as '
+      + genuinos + '\nedições verdadeiras da COPEN-FT não são tocadas.\n\n'
+      + 'Esta ação é reversível pelo botão "Repor backup".\n\nConfirmar?')) return;
+
+  var st = document.getElementById('cens-save-status');
+  if (st) st.textContent = '♻️ Restaurando… removendo ' + alvos.length + ' gravação(ões) automática(s).';
+
+  var caminhos = [];
+  if (ref  !== '-') caminhos.push('ensalar_copen_full/' + ref);
+  if (novo !== '-') caminhos.push('ensalar_copen/' + novo);
+  var erros = 0, feitos = 0;
+  for (var i = 0; i < alvos.length; i++){
+    var okLinha = false;
+    for (var c = 0; c < caminhos.length; c++){
+      try{ await dbRemove(caminhos[c] + '/' + alvos[i]); okLinha = true; }
+      catch(e){ erros++; }
+    }
+    if (okLinha) feitos++;
+    if (st && i % 25 === 0) st.textContent = '♻️ Restaurando… ' + (i+1) + ' de ' + alvos.length;
+  }
+  // limpa também os caches locais
+  try{
+    caminhos.forEach(function(k){
+      var cur = LS(k) || {};
+      alvos.forEach(function(id){ delete cur[id]; });
+      LSset(k, cur);
+    });
+  }catch(e){}
+
+  try{ if (typeof logAudit === 'function')
+        logAudit('editar_ensalamento', alvos.length + ' gravação(ões) automática(s) removida(s)',
+                 'RESTAURACAO', 'LOCAL_ESPACOS', 'removido'); }catch(e){}
+
+  if (st) st.textContent = '✅ Restauração concluída — ' + alvos.length
+    + ' gravação(ões) automática(s) removida(s). Recarregando a tabela…';
+  await copenEnsalarLoad();
+  copenEnsalarFilter();
+  alert('Restauração concluída.\n\n'
+    + 'Removidas: ' + feitos + ' de ' + alvos.length + '\n'
+    + 'Edições da COPEN-FT preservadas: ' + genuinos
+    + (erros ? '\nFalhas de rede: ' + erros + ' — rode novamente para concluir.' : '')
+    + '\n\nConfira o total de registros. Se precisar, recarregue a página com Ctrl+F5.');
+}
+
+
+// ═══════════════════════════════════════════════════════════════
+// REPOR BACKUP — desfaz qualquer ação
+// Lê o arquivo JSON gerado pela Inspeção e regrava os nós no Firebase
+// exatamente como estavam. É a rede de segurança: qualquer limpeza
+// pode ser revertida enquanto houver um backup.
+// ═══════════════════════════════════════════════════════════════
+function copenReporBackup(){
+  var inp = document.createElement('input');
+  inp.type = 'file'; inp.accept = '.json,application/json';
+  inp.onchange = function(){
+    var f = inp.files && inp.files[0];
+    if (!f) return;
+    var fr = new FileReader();
+    fr.onload = async function(){
+      var bk;
+      try{ bk = JSON.parse(fr.result); }
+      catch(e){ alert('Arquivo inválido: não é um backup JSON da PEN.'); return; }
+      if (!bk || !bk.nos){ alert('Arquivo inválido: não encontrei a seção "nos".'); return; }
+      var nos = Object.keys(bk.nos).filter(function(k){ return k.indexOf('ensalar') === 0; });
+      var totalReg = nos.reduce(function(a,k){ return a + Object.keys(bk.nos[k]||{}).length; }, 0);
+      if (!confirm('Repor o backup de ' + (bk.gerado || 'data desconhecida') + '?\n\n'
+        + nos.length + ' nó(s) e ' + totalReg + ' registro(s) serão regravados no Firebase,\n'
+        + 'voltando exatamente ao estado do backup.\n\nConfirmar?')) return;
+
+      var st = document.getElementById('cens-save-status');
+      var feitos = 0, erros = 0;
+      for (var n = 0; n < nos.length; n++){
+        var chave = nos[n], obj = bk.nos[chave] || {};
+        var ids = Object.keys(obj);
+        for (var i = 0; i < ids.length; i++){
+          try{ await dbSet(chave + '/' + ids[i], obj[ids[i]]); feitos++; }
+          catch(e){ erros++; }
+          if (st && feitos % 25 === 0)
+            st.textContent = '⤴️ Repondo backup… ' + feitos + ' de ' + totalReg;
+        }
+        try{ LSset(chave, obj); }catch(e){}
+      }
+      if (st) st.textContent = '✅ Backup reposto — ' + feitos + ' registro(s).';
+      try{ if (typeof logAudit === 'function')
+            logAudit('editar_ensalamento','Backup reposto','RESTAURACAO','', bk.gerado || ''); }catch(e){}
+      await copenEnsalarLoad(); copenEnsalarFilter();
+      alert('Backup reposto.\n\nRegistros regravados: ' + feitos
+        + (erros ? '\nFalhas: ' + erros : '') + '\n\nRecarregue com Ctrl+F5 para conferir.');
+    };
+    fr.readAsText(f);
+  };
+  inp.click();
+}
+
+
+// ═══════════════════════════════════════════════════════════════
+// RESOLVER CONFLITOS — painel de trabalho da COPEN-FT
+// Reúne todos os choques de sala num só lugar, agrupados por espaço,
+// mostrando os dois lados de cada conflito. O LOCAL pode ser trocado
+// ali mesmo: ao salvar, o registro é gravado, LAT/LONG/REF são
+// preenchidos pelo Perfil dos Espaços e a lista se recalcula na hora.
+// ═══════════════════════════════════════════════════════════════
+function _confPares(){
+  var mapa = (typeof _buildConflictMap === 'function') ? _buildConflictMap() : {};
+  var vistos = {}, pares = [];
+  Object.keys(mapa).forEach(function(idA){
+    (mapa[idA] || []).forEach(function(c){
+      // localiza o outro registro pelo par disciplina/turma/curso e dia
+      var idB = null;
+      Object.keys(_copenEnsData).forEach(function(k){
+        var r = _copenEnsData[k];
+        if (idB || !r || r._deleted || k === idA) return;
+        if (String(r.CODISC||'') === String(c.CODISC||'')
+            && String(r.CURSO||'')  === String(c.CURSO||'')
+            && String(r.CODTUR||'').toUpperCase() === String(c.CODTUR||'').toUpperCase()
+            && String(r[c.dia]||'').trim() === String(c.hOut||'').trim()) idB = k;
+      });
+      if (!idB) return;
+      var chave = [idA, idB].sort().join('|') + '|' + c.dia;
+      if (vistos[chave]) return;
+      vistos[chave] = 1;
+      pares.push({ a:idA, b:idB, dia:c.dia, hA:c.hCur, hB:c.hOut,
+                   nivel:c.nivel, motivo:c.motivo,
+                   local:(_copenEnsData[idA] && _copenEnsData[idA].LOCAL) || '' });
+    });
+  });
+  pares.sort(function(x,y){
+    return String(x.local).localeCompare(String(y.local),'pt-BR',{numeric:true})
+        || String(x.dia).localeCompare(String(y.dia)); });
+  return pares;
+}
+function _confLadoHTML(id, dia, hora, pid){
+  var r = _copenEnsData[id]; if (!r) return '';
+  var editado = (r._lastField === 'LOCAL');
+  return '<div style="flex:1;min-width:238px;border:1px solid #dce8e3;border-radius:9px;'
+    + 'padding:.55rem .65rem;background:' + (editado ? '#f0fdf4' : '#fff') + '">'
+    + '<div style="font-weight:800;font-size:.84rem;line-height:1.3">' + esc(r.DISC || '—') + '</div>'
+    + '<div style="font-size:.74rem;color:#667;margin-top:2px">'
+    +   esc(r.CODISC || '') + ' · ' + esc(r.CURSO || '') + ' · turma ' + esc(r.CODTUR || '')
+    +   ' · ' + esc(_DIA_LABEL[dia] || dia) + ' ' + esc(hora || '') + '</div>'
+    + '<div style="font-size:.74rem;color:#667;margin-bottom:.4rem">👤 ' + esc(r.PROF || 'A definir')
+    +   (editado ? ' · <b style="color:#1a936f">local já ajustado</b>' : '') + '</div>'
+    + '<div style="display:flex;gap:.35rem">'
+    +   '<input id="cf-in-' + esc(id) + '-' + esc(pid) + '" list="cens-locais-list" value="'
+    +     esc(r.LOCAL || '') + '" placeholder="Local" '
+    +     'style="flex:1;min-width:0;font-size:.82rem;padding:.32rem .45rem;border:1.5px solid #dce8e3;'
+    +     'border-radius:7px">'
+    +   '<button onclick="_confSalvar(\'' + esc(id) + '\',\'' + esc(pid) + '\')" '
+    +     'style="padding:.32rem .6rem;border:none;background:#0b4f6c;color:#fff;border-radius:7px;'
+    +     'font-weight:700;font-size:.78rem;cursor:pointer">Salvar</button>'
+    + '</div></div>';
+}
+async function _confSalvar(id, pid){
+  var inp = document.getElementById('cf-in-' + id + '-' + pid);
+  if (!inp) return;
+  var novo = String(inp.value || '').trim();
+  var r = _copenEnsData[id];
+  if (!r) return;
+  if (novo === String(r.LOCAL || '').trim()){ toast('O local não mudou.','warn'); return; }
+  r.LOCAL = novo;
+  r._lastField = 'LOCAL';
+  r._localOk = true;
+  if (typeof _espAplicarNaLinha === 'function') _espAplicarNaLinha(r, true);
+  try{ await copenEnsalarSave(id, 'LOCAL'); }catch(e){}
+  toast('Local salvo: ' + (r.DISC || id) + ' → ' + novo, 'ok');
+  copenEnsalarFilter();
+  _confRender();
+}
+function _confRender(){
+  var caixa = document.getElementById('cf-corpo');
+  if (!caixa) return;
+  var pares = _confPares();
+  var top = document.getElementById('cf-topo');
+  if (top) top.textContent = pares.length
+    ? pares.length + ' conflito(s) para resolver'
+    : 'Nenhum conflito de sala — tudo resolvido.';
+  if (!pares.length){
+    caixa.innerHTML = '<div style="padding:2.2rem;text-align:center;color:#557">'
+      + '<div style="font-size:2rem;margin-bottom:.5rem">✅</div>'
+      + 'Nenhum choque de sala nesta tabela.</div>';
+    return;
+  }
+  var salaAtual = null, html = '';
+  pares.forEach(function(pr, i){
+    if (pr.local !== salaAtual){
+      salaAtual = pr.local;
+      html += '<div style="margin:.9rem 0 .5rem;font-weight:800;font-size:.9rem;color:#0b4f6c;'
+        + 'text-transform:uppercase;letter-spacing:.5px;border-bottom:2px solid #cfe6dd;'
+        + 'padding-bottom:.25rem">🏫 ' + esc(salaAtual || 'Sem local') + '</div>';
+    }
+    html += '<div style="display:flex;gap:.6rem;flex-wrap:wrap;align-items:stretch;'
+      + 'padding:.5rem 0;border-bottom:1px dashed #eef3f1">'
+      + _confLadoHTML(pr.a, pr.dia, pr.hA, i)
+      + '<div style="align-self:center;font-weight:800;color:'
+      +   (pr.nivel === 'atencao' ? '#1e40af' : '#b45309') + ';font-size:.8rem">'
+      +   (pr.nivel === 'atencao' ? 'VERIFICAR' : '×') + '</div>'
+      + _confLadoHTML(pr.b, pr.dia, pr.hB, i)
+      + '</div>';
+  });
+  caixa.innerHTML = html;
+}
+function copenResolverConflitos(){
+  var fundo = document.createElement('div');
+  fundo.id = 'cf-modal';
+  fundo.style.cssText = 'position:fixed;inset:0;z-index:99999;background:rgba(8,20,28,.6);'
+    + 'display:flex;align-items:center;justify-content:center;padding:1rem';
+  fundo.innerHTML =
+    '<div style="background:#fff;border-radius:14px;max-width:1000px;width:100%;max-height:92vh;'
+    + 'display:flex;flex-direction:column;box-shadow:0 18px 50px rgba(0,0,0,.3);overflow:hidden">'
+    + '<div style="background:linear-gradient(135deg,#b45309,#f59e0b);color:#fff;padding:.9rem 1.1rem">'
+    +   '<div style="font-weight:800;font-size:.98rem">⚠️ Resolver conflitos de sala</div>'
+    +   '<div id="cf-topo" style="font-size:.78rem;opacity:.95">carregando…</div></div>'
+    + '<div style="padding:.7rem 1.1rem;font-size:.82rem;color:#233;border-bottom:1px solid #eef3f1;'
+    + 'line-height:1.5">Cada linha mostra as duas turmas que disputam a mesma sala. '
+    + 'Troque o local de um dos lados e clique em <b>Salvar</b> — a lista se atualiza sozinha. '
+    + 'O fundo verde indica o registro que você já ajustou.</div>'
+    + '<div id="cf-corpo" style="flex:1;overflow:auto;padding:.2rem 1.1rem 1rem"></div>'
+    + '<div style="padding:.85rem 1.1rem;border-top:1px solid #eef3f1;text-align:right">'
+    +   '<button id="cf-fechar" style="padding:.5rem 1.1rem;border:none;color:#fff;'
+    +   'background:#0b4f6c;border-radius:9px;font-weight:700;font-size:.82rem;cursor:pointer">Fechar</button>'
+    + '</div></div>';
+  document.body.appendChild(fundo);
+  var fim = function(){ try{ fundo.remove(); }catch(e){} };
+  fundo.querySelector('#cf-fechar').onclick = fim;
+  fundo.addEventListener('click', function(e){ if (e.target === fundo) fim(); });
+  _confRender();
+}
+
+
+// ═══════════════════════════════════════════════════════════════
+// RECUPERAR LOCAIS A PARTIR DE UM PAINEL PUBLICADO
+// O painel "Ocupação dos Espaços" (index.html) guarda, dentro do
+// próprio arquivo, qual disciplina estava em qual sala no momento em
+// que foi gerado. Serve como fotografia do ensalamento: comparando com
+// a tabela atual, dá para devolver os locais que foram sobrescritos.
+// ═══════════════════════════════════════════════════════════════
+function _recLerPainel(texto){
+  var i = texto.indexOf('const DATA = ');
+  if (i < 0) return null;
+  var bruto = texto.slice(i + 'const DATA = '.length);
+  var fim = bruto.lastIndexOf('};');
+  var DATA = null;
+  // tenta recortes progressivos até o JSON fechar
+  for (var corte = bruto.indexOf('};'); corte > 0 && corte < bruto.length; corte = bruto.indexOf('};', corte + 1)){
+    try{ DATA = JSON.parse(bruto.slice(0, corte + 1)); break; }catch(e){}
+  }
+  if (!DATA) return null;
+  var mapa = {}, dataGer = '';
+  var mG = texto.match(/COPEN-FT\s*·\s*(\d{2}\/\d{2}\/\d{4}\s*às\s*\d{2}:\d{2})/);
+  if (mG) dataGer = mG[1];
+  Object.keys(DATA).forEach(function(turno){
+    var d = DATA[turno];
+    if (!d || !d.rows || !d.timeColumns) return;
+    d.rows.forEach(function(r){
+      var loc = r.LOCAL || '';
+      d.timeColumns.forEach(function(col){
+        String(r[col] || '').split(' / ').forEach(function(parte){
+          var m = String(parte).trim().match(/^([A-Z0-9]+)\s*-\s*(.+?)(?:\s*-\s*Apenas.*)?$/);
+          if (!m) return;
+          var chave = m[1].trim().toUpperCase() + '|' + m[2].trim().toUpperCase();
+          (mapa[chave] = mapa[chave] || {})[loc] = 1;
+        });
+      });
+    });
+  });
+  return { mapa: mapa, gerado: dataGer };
+}
+function _recDivergencias(mapa){
+  var out = [];
+  Object.keys(_copenEnsData || {}).forEach(function(id){
+    var r = _copenEnsData[id];
+    if (!r || r._deleted) return;
+    var chave = String(r.CODISC||'').trim().toUpperCase() + '|'
+              + String(r.CODTUR||'').trim().toUpperCase();
+    var salas = mapa[chave];
+    if (!salas) return;
+    var lista = Object.keys(salas);
+    var atual = _localKey(r.LOCAL);
+    if (lista.some(function(x){ return _localKey(x) === atual; })) return;
+    out.push({ id:id, r:r, atual:r.LOCAL || '—', sugerido:lista[0], ambiguo:lista.length > 1, opcoes:lista });
+  });
+  return out.sort(function(a,b){
+    return String(a.r.CURSO).localeCompare(String(b.r.CURSO),'pt-BR')
+        || String(a.r.DISC).localeCompare(String(b.r.DISC),'pt-BR'); });
+}
+function copenRecuperarLocais(){
+  var inp = document.createElement('input');
+  inp.type = 'file'; inp.accept = '.html,text/html';
+  inp.onchange = function(){
+    var f = inp.files && inp.files[0]; if (!f) return;
+    var fr = new FileReader();
+    fr.onload = function(){
+      var lido = _recLerPainel(String(fr.result || ''));
+      if (!lido){ alert('Não consegui ler este arquivo.\n\nEnvie o index.html gerado pelo painel '
+        + '"Ocupação dos Espaços" (Relatórios › Ocupação por Turno › Gerar HTML interativo).'); return; }
+      var divs = _recDivergencias(lido.mapa);
+      _recMostrar(divs, lido.gerado);
+    };
+    fr.readAsText(f);
+  };
+  inp.click();
+}
+function _recMostrar(divs, gerado){
+  var fundo = document.createElement('div');
+  fundo.id = 'rec-modal';
+  fundo.style.cssText = 'position:fixed;inset:0;z-index:99999;background:rgba(8,20,28,.6);'
+    + 'display:flex;align-items:center;justify-content:center;padding:1rem';
+  var linhas = divs.length ? divs.map(function(d, i){
+      return '<label style="display:flex;gap:.6rem;align-items:flex-start;padding:.5rem .2rem;'
+        + 'border-bottom:1px solid #eef3f1;cursor:pointer">'
+        + '<input type="checkbox" class="rec-ck" checked data-i="' + i + '" '
+        + 'style="margin:.3rem 0 0;width:16px;min-width:16px;max-width:16px;height:16px;'
+        + 'flex:0 0 16px;padding:0;accent-color:#0b4f6c">'
+        + '<span style="flex:1;min-width:0">'
+        +   '<b>' + esc(d.r.CODISC || '') + '</b> · ' + esc(d.r.DISC || '')
+        +   ' <span style="color:#667">(' + esc(d.r.CURSO || '') + ' · turma '
+        +   esc(d.r.CODTUR || '') + ')</span><br>'
+        +   '<span style="font-size:.8rem">agora em <b style="color:#c0392b">' + esc(d.atual)
+        +   '</b> → voltar para <b style="color:#1a936f">' + esc(d.sugerido) + '</b>'
+        +   (d.ambiguo ? ' <i style="color:#b45309">(o painel mostra mais de uma sala)</i>' : '')
+        +   '</span></span></label>';
+    }).join('')
+    : '<div style="padding:1.6rem;text-align:center;color:#557">'
+      + 'Nenhuma diferença: os locais da tabela já batem com o painel.</div>';
+
+  fundo.innerHTML =
+    '<div style="background:#fff;border-radius:14px;max-width:760px;width:100%;max-height:92vh;'
+    + 'display:flex;flex-direction:column;box-shadow:0 18px 50px rgba(0,0,0,.3);overflow:hidden">'
+    + '<div style="background:linear-gradient(135deg,#0b4f6c,#1a936f);color:#fff;padding:.9rem 1.1rem">'
+    +   '<div style="font-weight:800;font-size:.98rem">🛟 Recuperar locais do painel publicado</div>'
+    +   '<div style="font-size:.76rem;opacity:.92">Painel gerado em ' + esc(gerado || 'data não identificada')
+    +   ' · ' + divs.length + ' divergência(s)</div></div>'
+    + '<div style="padding:.8rem 1.1rem;font-size:.84rem;color:#233;line-height:1.55;'
+    + 'border-bottom:1px solid #eef3f1">Cada linha mostra o local que está na tabela agora e o que '
+    + 'constava no painel. Desmarque o que não quiser mudar e confirme — os registros são gravados '
+    + 'como edição da COPEN-FT, com LAT, LONG e REF atualizados.</div>'
+    + '<div id="rec-lista" style="flex:1;overflow:auto;padding:.3rem 1.1rem;font-size:.86rem">'
+    +   linhas + '</div>'
+    + '<div style="padding:.9rem 1.1rem;border-top:1px solid #eef3f1;display:flex;gap:.5rem;'
+    + 'justify-content:space-between;flex-wrap:wrap;align-items:center">'
+    +   '<button id="rec-todos" style="padding:.45rem .8rem;border:1.5px solid #dce8e3;background:#fff;'
+    +   'border-radius:8px;font-weight:700;font-size:.8rem;cursor:pointer">Marcar / desmarcar todos</button>'
+    +   '<div style="display:flex;gap:.5rem">'
+    +     '<button id="rec-fechar" style="padding:.5rem .95rem;border:1.5px solid #dce8e3;background:#fff;'
+    +     'border-radius:9px;font-weight:700;font-size:.82rem;cursor:pointer">Fechar</button>'
+    +     (divs.length ? '<button id="rec-aplicar" style="padding:.5rem 1.1rem;border:none;color:#fff;'
+    +       'background:#1a936f;border-radius:9px;font-weight:700;font-size:.82rem;cursor:pointer">'
+    +       '🛟 Restaurar selecionados</button>' : '')
+    +   '</div></div></div>';
+  document.body.appendChild(fundo);
+  var fim = function(){ try{ fundo.remove(); }catch(e){} };
+  fundo.querySelector('#rec-fechar').onclick = fim;
+  fundo.addEventListener('click', function(e){ if (e.target === fundo) fim(); });
+  fundo.querySelector('#rec-todos').onclick = function(){
+    var cks = fundo.querySelectorAll('.rec-ck');
+    var marcar = ![].every.call(cks, function(c){ return c.checked; });
+    [].forEach.call(cks, function(c){ c.checked = marcar; });
+  };
+  var aplicar = fundo.querySelector('#rec-aplicar');
+  if (aplicar) aplicar.onclick = async function(){
+    var sel = [].filter.call(fundo.querySelectorAll('.rec-ck'), function(c){ return c.checked; })
+                .map(function(c){ return divs[parseInt(c.dataset.i, 10)]; });
+    if (!sel.length){ toast('Marque ao menos um registro.','warn'); return; }
+    if (!confirm('Restaurar o local de ' + sel.length + ' registro(s)?\n\n'
+      + 'Você pode desfazer com "Repor backup".')) return;
+    var st = document.getElementById('cens-save-status');
+    var ok = 0;
+    for (var i = 0; i < sel.length; i++){
+      var d = sel[i], r = _copenEnsData[d.id];
+      if (!r) continue;
+      r.LOCAL = d.sugerido;
+      r._lastField = 'LOCAL';
+      r._localOk = true;
+      if (typeof _espAplicarNaLinha === 'function') _espAplicarNaLinha(r, true);
+      try{ await copenEnsalarSave(d.id, 'LOCAL'); ok++; }catch(e){}
+      if (st && i % 10 === 0) st.textContent = '🛟 Restaurando locais… ' + (i+1) + ' de ' + sel.length;
+    }
+    try{ if (typeof logAudit === 'function')
+      logAudit('editar_ensalamento', ok + ' local(is) restaurado(s) do painel','LOCAL','','restauração'); }catch(e){}
+    fim();
+    await copenEnsalarLoad(); copenEnsalarFilter();
+    if (st) st.textContent = '✅ ' + ok + ' local(is) restaurado(s) a partir do painel.';
+    alert(ok + ' local(is) restaurado(s).\n\nConfira a tabela e o painel de conflitos.');
+  };
+}
+
+
+// ═══════════════════════════════════════════════════════════════
+// RECUPERAÇÃO — porta única para as ferramentas de manutenção
+// Reúne num só lugar o que antes eram vários botões na barra.
+// ═══════════════════════════════════════════════════════════════
+function copenManutencao(){
+  var fundo = document.createElement('div');
+  fundo.style.cssText = 'position:fixed;inset:0;z-index:99999;background:rgba(8,20,28,.6);'
+    + 'display:flex;align-items:center;justify-content:center;padding:1rem';
+  var opcao = function(id, ic, titulo, texto, cor){
+    return '<button id="' + id + '" style="display:flex;gap:.8rem;align-items:flex-start;width:100%;'
+      + 'text-align:left;padding:.85rem 1rem;margin-bottom:.6rem;border:1.5px solid #dce8e3;'
+      + 'background:#fff;border-radius:11px;cursor:pointer;font:inherit">'
+      + '<span style="font-size:1.4rem;line-height:1.1">' + ic + '</span>'
+      + '<span style="flex:1;min-width:0">'
+      +   '<span style="display:block;font-weight:800;font-size:.92rem;color:' + cor + '">' + titulo + '</span>'
+      +   '<span style="display:block;font-size:.82rem;color:#556;line-height:1.5;margin-top:2px">'
+      +   texto + '</span></span></button>';
+  };
+  fundo.innerHTML =
+    '<div style="background:#fff;border-radius:14px;max-width:560px;width:100%;'
+    + 'box-shadow:0 18px 50px rgba(0,0,0,.3);overflow:hidden">'
+    + '<div style="background:linear-gradient(135deg,#0b4f6c,#1a936f);color:#fff;padding:.9rem 1.1rem">'
+    +   '<div style="font-weight:800;font-size:.98rem">🛟 Recuperação e manutenção</div>'
+    +   '<div style="font-size:.76rem;opacity:.92">Escolha o que precisa fazer</div></div>'
+    + '<div style="padding:1rem 1.1rem">'
+    +   opcao('mnt-rec','🛟','Recuperar locais de um painel publicado',
+            'Compara a tabela com um index.html do painel de ocupação e devolve os locais '
+            + 'que foram trocados. O backup é baixado automaticamente antes.','#14532d')
+    +   opcao('mnt-cf','⚠️','Resolver conflitos de sala',
+            'Mostra os dois lados de cada choque, agrupados por sala, com troca de local ali mesmo.','#92400e')
+    +   opcao('mnt-bk','⤴️','Desfazer: repor um backup',
+            'Regrava no Firebase o conteúdo de um arquivo de backup JSON.','#0369a1')
+    +   '<div style="text-align:right;margin-top:.4rem">'
+    +   '<button id="mnt-fechar" style="padding:.5rem 1.1rem;border:none;color:#fff;background:#0b4f6c;'
+    +   'border-radius:9px;font-weight:700;font-size:.82rem;cursor:pointer">Fechar</button></div>'
+    + '</div></div>';
+  document.body.appendChild(fundo);
+  var fim = function(){ try{ fundo.remove(); }catch(e){} };
+  fundo.querySelector('#mnt-fechar').onclick = fim;
+  fundo.addEventListener('click', function(e){ if (e.target === fundo) fim(); });
+  fundo.querySelector('#mnt-rec').onclick = async function(){
+    fim();
+    // segurança primeiro: baixa o backup sem pedir nada
+    try{ await copenInspecionarDados(true); }catch(e){}
+    copenRecuperarLocais();
+  };
+  fundo.querySelector('#mnt-cf').onclick = function(){ fim(); copenResolverConflitos(); };
+  fundo.querySelector('#mnt-bk').onclick = function(){ fim(); copenReporBackup(); };
+}
+
 function copenEnsalarFilter() {
   const b   = (document.getElementById('cens-search')||{value:''}).value.toLowerCase();
   const cur = (document.getElementById('cens-curso-filter')||{value:''}).value;
   let rows = Object.values(_copenEnsData).filter(r => !r._deleted);
+  const _totalGeral = rows.length;
+  const _totalCopen = rows.filter(_ehAtualizadoCopen).length;
+  if (_censSoCopen) rows = rows.filter(_ehAtualizadoCopen);
   if (cur) rows = rows.filter(r => r.CURSO === cur);
   if (b)   rows = rows.filter(r =>
     (r.DISC||'').toLowerCase().includes(b) || (r.CODISC||'').toLowerCase().includes(b) ||
@@ -8610,7 +9425,11 @@ function copenEnsalarFilter() {
   });
   _copenEnsSorted = rows;
   const cnt = document.getElementById('cens-count');
-  if (cnt) cnt.textContent = rows.length + ' registro(s)';
+  if (cnt) {
+    // guarda o texto-base para o contador de conflitos não sobrescrever
+    cnt.dataset.base = rows.length + ' registro(s)';
+    cnt.textContent = cnt.dataset.base;
+  }
   copenEnsalarRender();
 }
 
@@ -8948,7 +9767,7 @@ function _censAtualizarContadorConflitos(map){
   try{
     const el=document.getElementById('cens-count');
     if(!el) return;
-    const base=(el.textContent||'').split('·')[0].trim();
+    const base = el.dataset.base || (el.textContent||'').split('·')[0].trim();
     let nC=0,nA=0;
     Object.keys(map||{}).forEach(function(id){
       const nv=_nivelLinha(map[id]);
@@ -10071,7 +10890,22 @@ async function _espSincronizarEnsalar(motivo){
     if(t2 && t2.children.length && typeof ensalarRender==='function') ensalarRender();
   }catch(ex){ console.warn('_espSincronizarEnsalar (memoria):', ex); }
 
-  // 3) grava — apenas na sessao da COPEN-FT
+  // 3) NADA é gravado aqui.
+  // A propagação de LAT/LONG/REF já acontece em memória a cada renderização
+  // (copenEnsalarRender, ensalarRender e relRows). Gravar no Firebase fazia
+  // com que linhas existentes apenas no seed da planilha fossem persistidas,
+  // aumentando o total de registros e trazendo de volta linhas do semestre
+  // de referência que a COPEN-FT já havia promovido.
+  if(alterados.length){
+    var _st = document.getElementById('cens-save-status');
+    if(_st) _st.textContent = '🏫 ' + alterados.length
+      + ' registro(s) atualizado(s) com os dados do Perfil dos Espaços (apenas em tela).';
+  }
+  _espSyncEmAndamento = false;
+  return alterados.length;
+}
+async function _espSincronizarEnsalarLegado(){
+  var alterados = [];
   var ehCopen = !!(typeof currentUser!=='undefined' && currentUser && currentUser.role==='copen');
   if(!ehCopen || !alterados.length){ _espSyncEmAndamento=false; return alterados.length; }
 
